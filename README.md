@@ -17,11 +17,11 @@
 
 | # | Tool | Description |
 |:-:|------|-------------|
-| 💾 | **[Get-DiskHealth.ps1](#get-diskhealthps1)** | Native PowerShell script for local, remote (WinRM), and offline (CDI txt report) S.M.A.R.T. diagnostics. |
+| 💾 | **[DiskHealth.ps1](#diskhealthps1)** | Native PowerShell script for local, remote (WinRM), and offline (CDI txt report) S.M.A.R.T. diagnostics. |
 
 ---
 
-## 💾 Get-DiskHealth.ps1
+## 💾 DiskHealth.ps1
 
 > Lightweight PowerShell diagnostic script to query physical disks and parse S.M.A.R.T. data natively.
 
@@ -38,6 +38,14 @@ A native PowerShell script that connects locally or remotely via WinRM, queries 
 
 For SATA/IDE drives, it queries S.M.A.R.T. byte arrays and maps vendor-specific IDs (Samsung vs Patriot/SMI vs Generic). For NVMe drives, it automatically checks if **smartctl** is installed (with JSON output support) to get full S.M.A.R.T. telemetry, falling back to CIM Storage Reliability Counters (`MSFT_StorageReliabilityCounter`) if smartctl is absent.
 
+For NVMe drives connected through USB/UASP enclosures, DiskHealth maps `/dev/sd*` back to the corresponding Windows `PhysicalDrive` index, so an enclosure that rewrites the visible model or serial cannot prevent the underlying NVMe telemetry from being selected. It prefers bridge types returned by `smartctl --scan-open`; an exact USB VID:PID allowlist is used only for live-verified controllers that scan as generic SCSI wrappers, currently `152D:0581` with `sntjmicron`.
+
+Remote use remembers successful PCs per network. Opening **Network computer (WinRM)** first probes only previously connected PCs associated with the current network identity; the selector offers a separate full LAN scan when needed. Target metadata lives in `%LOCALAPPDATA%\WinRMDiscovery`, while credentials use the shared Windows DPAPI profile store under `%LOCALAPPDATA%\WinRMConnection\credentials`. Each profile remains scoped to the matching DiskHealth `NetworkId` plus hostname/IP aliases.
+
+Authenticated session opening uses the pinned shared `WinRMConnection` module. It performs a short TCP preflight, reports each of up to three bounded attempts, retries only transient transport failures, and stops immediately for authentication, TrustedHosts, name-resolution, or configuration failures.
+
+Slow storage APIs are called only when they can add evidence. In particular, `Get-StorageReliabilityCounter` is never queried for USB disks and smartctl identity probes are a fallback only when the deterministic Windows disk-index mapping is unavailable.
+
 It queries native Windows PnP (`Get-PnpDeviceProperty`) telemetry to query **PCIe Link Speed & Width** (Transfer Mode) for NVMe drives (e.g. `PCIe 4 x4 | PCIe 4 x4`). It also parses and displays **Storage Standard** (e.g. `NVM Express 1.4` or `SATA ACS-2`) and **Rotation Rate** (e.g. `---- (SSD)` vs `7200 RPM` for HDDs).
 
 It also parses exported CrystalDiskInfo txt reports, supporting both SATA and NVMe formats (automatically hiding useless columns, converting raw logs like Kelvin-to-Celsius/sectors-to-GB, and formatting all raw attributes in a readable decimal structure).
@@ -45,7 +53,7 @@ It also parses exported CrystalDiskInfo txt reports, supporting both SATA and NV
 ```
 +--------------------+               WinRM Session               +----------------------+
 | Local Workstation  | ========================================> |  Remote Target Host  |
-| (Get-DiskHealth)   | <======================================== | (smartctl or WMI API)|
+| (DiskHealth)       | <======================================== | (smartctl or WMI API)|
 +--------------------+        Retrieves Raw SMART Bytes          +----------------------+
           ||
           \/
@@ -61,22 +69,46 @@ It also parses exported CrystalDiskInfo txt reports, supporting both SATA and NV
 *From terminal:*
 
 ```powershell
-# Example 1 — Query remote system with default credentials (empty password)
-pwsh -NoProfile -File "Get-DiskHealth.ps1" -ComputerName "192.168.1.118" -Username "user"
+# Example 1 — Normal interactive launch: choose Local or Network first
+pwsh -NoProfile -File "DiskHealth.ps1"
 
-# Example 2 — Query local system
-pwsh -NoProfile -File "Get-DiskHealth.ps1" -ComputerName "localhost"
+# Example 2 — Query remote system directly from CLI
+pwsh -NoProfile -File "DiskHealth.ps1" -ComputerName "192.168.1.118" -Username "user"
 
-# Example 3 — Offline analysis of an exported CrystalDiskInfo report file (SATA or NVMe)
-pwsh -NoProfile -File "Get-DiskHealth.ps1" -FilePath "C:\Reports\CrystalDiskInfo.txt"
+# Example 3 — Query local system explicitly
+pwsh -NoProfile -File "DiskHealth.ps1" -ComputerName "localhost"
+
+# Example 4 — Offline analysis of an exported CrystalDiskInfo report file (SATA or NVMe)
+pwsh -NoProfile -File "DiskHealth.ps1" -FilePath "C:\Reports\CrystalDiskInfo.txt"
+
+# Example 5 — Explicitly allow smartctl installation on a remote target if it is missing
+pwsh -NoProfile -File "DiskHealth.ps1" -ComputerName "192.168.1.118" -Username "user" -InstallSmartctl
+
+# Example 6 — CLI shortcut directly into LAN discovery
+pwsh -NoProfile -File "DiskHealth.ps1" -Discover -Username "user"
+
+# Example 7 — Record per-phase timings for discovery, WinRM, and disk probes
+pwsh -NoProfile -File "DiskHealth.ps1" -ComputerName "192.168.1.118" -Benchmark
 ```
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `-ComputerName` | `string` | `192.168.1.118` | The hostname or IP address of the target machine. |
+| `-ComputerName` | `string` | `localhost` | The hostname or IP address of the target machine. The value is used directly only when the parameter is explicitly supplied. |
 | `-Username` | `string` | `user` | The WinRM username to connect with. |
 | `-Password` | `string` | `""` | The WinRM connection password. |
 | `-FilePath` | `string` | `""` | Optional local path to an exported CrystalDiskInfo txt report. |
+| `-InstallSmartctl` | `switch` | `false` | Explicitly permits an official `winget` machine-scope installation of `smartmontools.smartmontools` into `C:\Program Files\smartmontools` when the remote target is missing smartctl. |
+| `-Discover` | `switch` | `false` | Uses the shared PC-only LAN discovery engine and opens a target selector before WinRM collection. |
+| `-DiscoveryStateRoot` | `string` | `""` | Optional absolute path for network-scoped discovery history/cache. |
+| `-Benchmark` | `switch` | `false` | Writes phase timings to `%LOCALAPPDATA%\DiskHealth\logs\probe_benchmark_*.log`. |
+
+Normal no-argument launch performs **no disk scan first**. It opens an arrow-selectable source menu with `💻 Local computer` and `🌐 Network computer (WinRM)`. The Local disk menu contains disks only. The Network path lists reachable saved PCs from the current network first and includes **Scan network for more PCs** when a full discovery is wanted.
+
+After a successful authenticated session opens, DiskHealth remembers the username in shared connection history and stores the credential locally with Windows DPAPI. On the same network it tries that credential first; only an `AuthenticationRejected` result removes a cached profile and triggers one replacement prompt. TCP, timeout, and transport failures preserve it. The credential can be decrypted only by the same Windows user in the same Windows installation, so copying the profile—or formatting Windows—does not make it portable.
+
+`ESC` means **Back** in every child menu: local disks return to the main menu, remote disks return immediately to the cached PC selector, and the PC selector returns to the main menu. Only `ESC` on the main menu exits the program. Direct CLI parameters bypass the startup menu and remain available for automation.
+
+`Get-DiskHealth.ps1` remains available as a compatibility launcher and forwards explicitly supplied parameters to `DiskHealth.ps1`.
 
 ---
 
@@ -88,8 +120,10 @@ No installation required! Just copy the script and run it using PowerShell 7.
 
 ```powershell
 # Run the script directly
-pwsh -NoProfile -File "Get-DiskHealth.ps1"
+pwsh -NoProfile -File "DiskHealth.ps1"
 ```
+
+`smartctl` is strongly recommended for complete NVMe and ATA telemetry. Install it normally with the official smartmontools installer or `winget install --id smartmontools.smartmontools --exact`. DiskHealth never creates a private fallback under `C:\`; remote installation occurs only when `-InstallSmartctl` is explicitly supplied and fails visibly if `winget` or elevation is unavailable.
 
 ### Requirements
 
@@ -106,6 +140,10 @@ pwsh -NoProfile -File "Get-DiskHealth.ps1"
 
 ```
 DiskHealth/
+├── .gitattributes                       # Repository line-ending policy
+├── .assets/
+│   ├── WinRMConnection/                 # Pinned shared authenticated WinRM connector
+│   └── WinRMDiscovery/                  # Pinned shared LAN PC discovery module
 ├── .agents/                             # Workspace Customizations
 │   └── AGENTS.md                        # Workspace rule mandates (e.g. smartctl notification)
 ├── diagnostic_reports/                  # Consolidated telemetry data, CDI reports, and screenshots
@@ -115,9 +153,19 @@ DiskHealth/
 │   ├── newssd/                          # CDI reports for new good SSD target
 │   ├── CrystalDiskInfo_20260713101407.txt # Backup Samsung SSD CDI report
 │   └── CrystalDiskInfo_20260713101417.png # Backup Samsung SSD CDI screenshot
-├── Get-DiskHealth.ps1                   # Main native diagnostics script
+├── DiskHealth.ps1                       # Canonical interactive and CLI entrypoint
+├── Get-DiskHealth.ps1                   # Backward-compatible launcher
+├── tests/
+│   ├── AtaTelemetry.Tests.ps1           # Packed ATA temperature regression fixtures
+│   ├── NvmeTelemetry.Tests.ps1          # Regression fixtures for 128-bit NVMe counters
+│   ├── SmartctlBridgeMapping.Tests.ps1   # Windows PhysicalDrive and USB/UASP bridge mapping
+│   ├── RemoteHistoryPerformance.Tests.ps1 # DPAPI/network scope and slow-probe guards
+│   ├── ToolingPolicy.Tests.ps1           # smartmontools acquisition/placement guardrails
+│   ├── WinRMConnectionIntegration.Tests.ps1 # Authenticated connector integration guard
+│   └── WinRMDiscoveryIntegration.Tests.ps1 # Discovery integration guard
 ├── README.md                            # You are here
-└── CHANGELOG.md                         # Project changelog
+├── CHANGELOG.md                         # Project changelog
+└── PROJECT_RULES.md                     # Durable project decisions and validation history
 ```
 
 ---
@@ -136,7 +184,17 @@ For SATA drives, the script retrieves the raw 512-byte array from `MSStorageDriv
 
 If the drive is NVMe and **smartctl** is present, the script queries properties via JSON schema:
 - `nvme_smart_health_information_log`: Contains warning indicators, composite temperatures, spare health, block reads/writes, unsafe shutdowns, and all thermal sensors configurations (IDs `0x01` through `0x1D`).
-- All raw attribute outputs are formatted as clean **Decimal** numbers instead of hex values for user readability.
+- NVMe counters are parsed as 128-bit-capable `BigInteger` values. Values that exceed `UInt64` are preserved rather than truncated or rewritten to zero.
+- For USB/UASP bridges, the Windows disk index is the primary deterministic match (`/dev/sda` → `PhysicalDrive0`, `/dev/sdb` → `PhysicalDrive1`, and so on). Model and serial matching remain a fallback because some bridges expose wrapper identities that differ from the underlying drive. Controller-specific `-d` overrides are never brute-forced: they require an exact USB VID:PID allowlist entry backed by a successful live read.
+
+</details>
+
+<details>
+<summary><b>What does REVIEW mean for an NVMe drive?</b></summary>
+
+`REVIEW` means the collected fields are internally inconsistent and cannot safely support either a failure or healthy-drive conclusion. The known regression fixture has a zero lower 64-bit media-error count, non-zero upper bytes, `Critical Warning = 0`, and zero error-log entries; the script displays the full value and labels it as telemetry anomaly instead of hiding it.
+
+`REVIEW (100%)` does **not** mean the whole drive is verified healthy: `100%` is the independent NAND remaining-life estimate derived from `Percentage Used`. Replacement decisions require corroborating evidence such as changing counters, self-test failure, read errors, OS storage events, or reproducible instability.
 
 </details>
 

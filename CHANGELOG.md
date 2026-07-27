@@ -5,6 +5,119 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.0] - 2026-07-28
+
+### Changed
+- Upgraded the pinned `WinRMConnection` runtime to `1.1.0` and routed DiskHealth credential lookup, save, and removal through its canonical DPAPI profile APIs.
+- Preserved DiskHealth network isolation by passing the current `WinRMDiscovery` `NetworkId` as the shared credential profile scope and retaining hostname/IP aliases.
+- Saved credentials immediately after successful authenticated session opening and closed every opened session through `finally`.
+
+### Fixed
+- Removed the duplicated consumer-owned SHA-256/CLIXML credential implementation.
+- Removed cached profiles only after classified `AuthenticationRejected`; TCP, timeout, transport, and unrelated explicit-credential failures no longer delete saved credentials.
+
+### Migration
+- Migrated the existing `SE` / `192.168.1.5` profiles for the `datacomputer2` job LAN into the shared store without exposing plaintext. The two legacy DiskHealth files were preserved for recovery.
+
+### Tests
+- Passed all seven DiskHealth regression/integration files, the shared WinRMConnection PS7/Windows PowerShell 5.1 suites, parser validation, PSScriptAnalyzer error review, and vendored-hash verification.
+
+## [1.21.0] - 2026-07-27
+
+### Changed
+- Routed authenticated WinRM session opening through the pinned shared `WinRMConnection` module with TCP preflight, three bounded attempts, visible retry status, categorized failures, blank-password credential support, and transient-only retry.
+
+### Tests
+- Added a focused integration guard and passed the shared PS7/Windows PowerShell 5.1 offline suites plus an elevated authenticated localhost smoke.
+
+## [1.20.0] - 2026-07-23
+
+### Added
+- Added a network-scoped database of previously connected WinRM PCs. The Network menu now probes saved targets on the current LAN first and offers a full network scan only as a separate action.
+- Added consumer-owned Windows DPAPI credential storage under `%LOCALAPPDATA%\DiskHealth\credentials`; passwords are never stored in the shared discovery history or as plaintext.
+- Added automatic reuse of the last successful credentials only when both the saved target and current network identity match.
+- Added opt-in `-Benchmark` phase logs under `%LOCALAPPDATA%\DiskHealth\logs`.
+- Added hidden `-NoUI` support for deterministic automation and end-to-end regression runs.
+
+### Changed
+- Made `Get-StorageReliabilityCounter` a native-NVMe fallback only and skipped it for USB storage, avoiding a measured 36-second UASP timeout.
+- Reused one `smartctl --scan-open` result and used deterministic Windows physical-drive indexes before any identity probe, avoiding a measured 6-second USB/SCSI identity delay.
+- Successful WinRM connections now refresh host/IP/MAC/username metadata through `WinRMDiscovery` 1.1.0 and save the credential separately with DPAPI.
+- Authentication rejection deletes the stale saved credential before an interactive retry.
+
+### Fixed
+- Preserved target alias collections as arrays. PowerShell previously unwrapped a one-item pipeline result into a scalar string and concatenated later aliases into an invalid credential key.
+
+### Tests
+- Added DPAPI round-trip, network-isolation, stale-removal, benchmark-phase, and performance-guard regressions.
+- Verified passwordless credential reuse against SE and reduced the measured remote operation from about 46.7 seconds to 4.3 seconds after warm-up.
+
+## [1.19.0] - 2026-07-23
+
+### Fixed
+- Fixed S.M.A.R.T. collection for NVMe drives behind USB/UASP bridges whose Windows wrapper model and serial differ from the underlying NVMe identity.
+- Mapped `smartctl --scan-open` `/dev/sd*` candidates deterministically to their Windows `PhysicalDrive` index instead of requiring wrapper identity equality.
+- Fixed PowerShell single-item array unwrapping that caused one valid scan candidate to be treated as an empty match.
+- Added an evidence-backed `152D:0581` → `sntjmicron` override for the JMicron USB-to-NVMe bridge, because smartctl 7.5 scans this controller only as a generic SCSI device with no health support.
+- Promoted the actual protocol from smartctl JSON, so an NVMe exposed as a generic USB/SCSI disk is analyzed as NVMe and no longer falls through to the SATA-only path.
+- Replaced wrapper model, serial, and firmware with the underlying smartctl identity after a successful read.
+- Removed literal Markdown asterisks from model and serial console output.
+- Added an explicit smartctl collection reason when no ATA/NVMe health payload can be retrieved.
+
+### Tests
+- Added the real SK hynix HFS256GD9TNG USB/UASP wrapper mismatch as a regression fixture.
+- Verified the full parser and telemetry suite, an elevated local NVMe run, and an end-to-end WinRM read of the exact SK hynix/JMicron enclosure on SE.
+
+## [1.18.0] - 2026-07-22
+
+### Added
+- Added an initial arrow-key source selector with `💻 Local computer` and `🌐 Network computer (WinRM)` before any disk or network collection begins.
+- Added `Get-DiskHealth.ps1` as a thin backward-compatible launcher for the canonical script.
+
+### Changed
+- Renamed the canonical entrypoint to `DiskHealth.ps1`.
+- Normal no-argument launch no longer wastes time scanning local disks when the intended target is remote.
+- Removed LAN discovery from the Local disk menu; target type is chosen only from the main menu.
+- Changed child-menu `ESC` behavior to navigate one level back. Only the main menu exits, and remote-disk Back reuses the existing discovery results instead of rescanning the LAN.
+- Local headers now use `💻`; `🌐` is reserved for remote targets.
+- Replaced the obsolete remote smartctl 7.4 ZIP/C-root fallback with an explicit official `winget` machine-scope installation into `C:\Program Files\smartmontools`.
+
+### Tests
+- Added a tooling-policy regression check that rejects SourceForge 7.4 downloads and new smartmontools install folders directly under `C:\`.
+
+## [1.17.0] - 2026-07-22
+
+### Added
+- Added the normal interactive workflow `local disks → LAN discovery → arrow-selected PC → inline WinRM login → remote disks → return to local`.
+- Added width-safe menu labels and keyboard shortcuts (`↑/↓`, `Enter`, `1-9`, `ESC`).
+- Added ATA temperature regression fixtures based on the live WD Green packed raw value.
+
+### Fixed
+- Changed the no-argument target from the obsolete hardcoded `192.168.1.118` to `localhost`.
+- Fixed ATA temperature display so packed raw counters such as `201864380451` use smartctl's decoded `35°C` value instead of being mislabeled as Celsius.
+
+## [1.16.0] - 2026-07-22
+
+### Added
+- Added optional `-Discover` target selection backed by the shared `WinRMDiscovery` module proven in DeviceCheck.
+- Added a pinned `.assets\WinRMDiscovery` runtime copy and an integration test that validates the module manifest, exported command, parser, and new parameters.
+
+### Changed
+- LAN discovery remains read-only and PC-only; the direct `-ComputerName` workflow and existing defaults are preserved.
+
+## [1.15.0] - 2026-07-22
+
+### Fixed
+- Preserved NVMe 128-bit counters with `BigInteger` instead of overflowing to `UInt64` and silently replacing them with zero.
+- Added `REVIEW` classification for structurally inconsistent telemetry: non-zero upper 64 bits, zero lower 64 bits, no critical warning, and no error-log entries.
+- Replaced USB bridge protocol brute-forcing with device types returned by `smartctl --scan-open` and identity matching.
+- Prevented NVMe `Critical Warning` (`BAD`) from being downgraded by a later media-error check.
+- Corrected `Host Write Commands`, which was previously displayed with an `hrs` suffix.
+- Removed absolute “fully stable/safe” conclusions that cannot be established from one S.M.A.R.T. snapshot.
+
+### Changed
+- Remote smartctl installation is now opt-in through `-InstallSmartctl`; missing tooling no longer triggers an automatic download by default.
+
 ## [1.14.1] - 2026-07-13
 
 ### Added
