@@ -33,6 +33,9 @@ foreach ($functionName in @(
         'ConvertTo-DiskHealthReportRows'
         'Split-DiskHealthReportText'
         'ConvertTo-DiskHealthCompactTableLines'
+        'Get-DiskHealthAdaptiveTableWidths'
+        'Get-DiskHealthAdaptiveHeaderCells'
+        'ConvertTo-DiskHealthAdaptiveTableLines'
         'Get-DiskHealthReportAnsiColor'
         'Get-DiskHealthReportDisplayLines'
         'New-DiskHealthReportFrame'
@@ -80,11 +83,23 @@ for ($index = 0; $index -lt 75; $index++) {
 
 $wideLines = @(Get-DiskHealthReportDisplayLines -Rows @($reportRows) -Width 116)
 Assert-TuiRegression ($wideLines.PlainText -contains '  | ID   | Attribute Name                     | Score   | Worst   | Fail <=   | Vendor Raw        |') 'Wide report lost the original SMART table.'
-$compactLines = @(Get-DiskHealthReportDisplayLines -Rows @($reportRows) -Width 56)
+$nearBreakpointLines = @(Get-DiskHealthReportDisplayLines -Rows @($reportRows) -Width 98)
+Assert-TuiRegression (-not (@($nearBreakpointLines.PlainText | Where-Object { $_ -like 'SMART attributes (compact view):*' }).Count)) 'The table changed abruptly to stacked mode just below its natural width.'
+Assert-TuiRegression (@($nearBreakpointLines.PlainText | Where-Object { $_.TrimStart().StartsWith('| ID') }).Count -eq 1) 'The adaptive table header disappeared just below its natural width.'
+
+$mediumLines = @(Get-DiskHealthReportDisplayLines -Rows @($reportRows) -Width 56)
+Assert-TuiRegression (-not (@($mediumLines.PlainText | Where-Object { $_ -like 'SMART attributes (compact view):*' }).Count)) 'A medium-width report changed to stacked mode instead of keeping the table.'
+Assert-TuiRegression (@($mediumLines.PlainText | Where-Object { $_.TrimStart().StartsWith('| ID') }).Count -eq 1) 'The medium-width report did not retain a table header.'
+Assert-TuiRegression (@($mediumLines.PlainText | Where-Object { $_ -match 'Reallocated|Sectors|Count' }).Count -ge 2) 'A long attribute name did not expand vertically inside the adaptive table row.'
+foreach ($line in $mediumLines) {
+    Assert-TuiRegression ($line.PlainText.Length -le 56) "Adaptive table line exceeds 56 columns: $($line.PlainText)"
+}
+
+$compactLines = @(Get-DiskHealthReportDisplayLines -Rows @($reportRows) -Width 48)
 Assert-TuiRegression (@($compactLines.PlainText | Where-Object { $_ -like 'SMART attributes (compact view):*' }).Count -gt 0) 'Compact report did not switch away from the fixed-width SMART table.'
 Assert-TuiRegression (-not (@($compactLines.PlainText | Where-Object { $_.TrimStart().StartsWith('|') }).Count)) 'Compact report retained a fixed-width table row.'
 foreach ($line in $compactLines) {
-    Assert-TuiRegression ($line.PlainText.Length -le 56) "Compact report line exceeds 56 columns: $($line.PlainText)"
+    Assert-TuiRegression ($line.PlainText.Length -le 48) "Compact report line exceeds 48 columns: $($line.PlainText)"
 }
 
 $widthSequence = @(120, 101, 100, 99, 98, 80, 60, 120)

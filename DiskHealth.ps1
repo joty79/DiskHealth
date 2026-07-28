@@ -1037,6 +1037,152 @@ function ConvertTo-DiskHealthCompactTableLines {
     return @(Split-DiskHealthReportText -Text ($cells -join ' · ') -Width $Width)
 }
 
+function Get-DiskHealthAdaptiveTableWidths {
+    param(
+        [int]$ColumnCount,
+        [int]$Width,
+        [int]$IndentLength = 2
+    )
+
+    $tableWidth = [Math]::Max(1, $Width - $IndentLength)
+    $borderOverhead = (3 * $ColumnCount) + 1
+    $contentBudget = $tableWidth - $borderOverhead
+    if ($contentBudget -lt $ColumnCount) { return @() }
+
+    if ($ColumnCount -eq 6) {
+        # Preserve the familiar SMART columns down to 56 printable columns.
+        # Shrink the descriptive fields first, then abbreviate numeric headers;
+        # cell contents wrap vertically instead of changing to a card layout.
+        if ($contentBudget -lt 35) { return @() }
+        $widths = [int[]]@(4, 34, 7, 7, 9, 17)
+        $shrinkPlan = @(
+            [pscustomobject]@{ Index = 1; Minimum = 16 }
+            [pscustomobject]@{ Index = 5; Minimum = 10 }
+            [pscustomobject]@{ Index = 4; Minimum = 5 }
+            [pscustomobject]@{ Index = 2; Minimum = 4 }
+            [pscustomobject]@{ Index = 3; Minimum = 4 }
+            [pscustomobject]@{ Index = 1; Minimum = 10 }
+            [pscustomobject]@{ Index = 5; Minimum = 8 }
+        )
+        $deficit = [Math]::Max(0, ($widths | Measure-Object -Sum).Sum - $contentBudget)
+        foreach ($step in $shrinkPlan) {
+            if ($deficit -le 0) { break }
+            $available = $widths[$step.Index] - $step.Minimum
+            $reduction = [Math]::Min($deficit, $available)
+            $widths[$step.Index] -= $reduction
+            $deficit -= $reduction
+        }
+        if ($deficit -gt 0) { return @() }
+        return @($widths)
+    }
+
+    if ($ColumnCount -eq 2) {
+        if ($contentBudget -lt 20) { return @() }
+        $leftWidth = [Math]::Min(34, [Math]::Max(12, [int][Math]::Floor($contentBudget * 0.62)))
+        $rightWidth = $contentBudget - $leftWidth
+        if ($rightWidth -lt 8) {
+            $rightWidth = 8
+            $leftWidth = $contentBudget - $rightWidth
+        }
+        return @([int]$leftWidth, [int]$rightWidth)
+    }
+
+    if ($ColumnCount -eq 1) {
+        return @([Math]::Max(1, $contentBudget))
+    }
+
+    $baseWidth = [Math]::Floor($contentBudget / $ColumnCount)
+    if ($baseWidth -lt 3) { return @() }
+    $widths = [int[]]@(for ($index = 0; $index -lt $ColumnCount; $index++) { $baseWidth })
+    $widths[$ColumnCount - 1] += $contentBudget - (($widths | Measure-Object -Sum).Sum)
+    return @($widths)
+}
+
+function Get-DiskHealthAdaptiveHeaderCells {
+    param(
+        [Parameter(Mandatory)][string[]]$Cells,
+        [Parameter(Mandatory)][int[]]$Widths
+    )
+
+    $result = [string[]]@($Cells)
+    if ($Cells.Count -ne 6 -or $Cells[0] -ne 'ID') { return @($result) }
+
+    $result[1] = 'Attribute'
+    $result[2] = switch ($Cells[2]) {
+        'Current' { if ($Widths[2] -ge 7) { 'Current' } else { 'Cur' } }
+        'Score'   { if ($Widths[2] -ge 5) { 'Score' } else { 'Scr' } }
+        default   { $Cells[2] }
+    }
+    $result[3] = if ($Widths[3] -ge 5) { 'Worst' } else { 'Wst' }
+    $result[4] = if ($Widths[4] -ge 9 -and $Cells[4] -eq 'Threshold') { 'Threshold' } else { 'Fail' }
+    $result[5] = if ($Widths[5] -ge 10 -and $Cells[5] -eq 'Vendor Raw') { 'Vendor Raw' } else { $Cells[5] }
+    return @($result)
+}
+
+function ConvertTo-DiskHealthAdaptiveTableLines {
+    param(
+        [AllowEmptyString()][string]$Text,
+        [int]$Width
+    )
+
+    $Width = [Math]::Max(1, $Width)
+    if ($Text.Length -le $Width) { return @($Text) }
+
+    $trimmed = $Text.Trim()
+    $indent = [regex]::Match($Text, '^\s*').Value
+    if ($indent.Length -ge $Width) { $indent = '' }
+
+    if ($trimmed -match '^\+(?:-+\+)+$') {
+        $segments = @($trimmed.Substring(1, $trimmed.Length - 2).Split('+'))
+        $widths = @(Get-DiskHealthAdaptiveTableWidths -ColumnCount $segments.Count -Width $Width -IndentLength $indent.Length)
+        if ($widths.Count -ne $segments.Count) {
+            return @(ConvertTo-DiskHealthCompactTableLines -Text $Text -Width $Width)
+        }
+        $border = [System.Text.StringBuilder]::new($indent + '+')
+        foreach ($cellWidth in $widths) {
+            $null = $border.Append(('-' * ($cellWidth + 2)) + '+')
+        }
+        return @($border.ToString())
+    }
+
+    if (-not ($trimmed.StartsWith('|') -and $trimmed.EndsWith('|'))) {
+        return @(Split-DiskHealthReportText -Text $Text -Width $Width)
+    }
+
+    [string[]]$cells = @($trimmed.Trim('|').Split('|') | ForEach-Object { $_.Trim() })
+    $widths = @(Get-DiskHealthAdaptiveTableWidths -ColumnCount $cells.Count -Width $Width -IndentLength $indent.Length)
+    if ($widths.Count -ne $cells.Count) {
+        return @(ConvertTo-DiskHealthCompactTableLines -Text $Text -Width $Width)
+    }
+
+    $isHeader = $cells.Count -eq 6 -and $cells[0] -eq 'ID'
+    if ($isHeader) {
+        $cells = @(Get-DiskHealthAdaptiveHeaderCells -Cells $cells -Widths $widths)
+    }
+
+    $cellLines = [System.Collections.Generic.List[object]]::new()
+    $rowHeight = 1
+    for ($cellIndex = 0; $cellIndex -lt $cells.Count; $cellIndex++) {
+        $wrappedCell = @(Split-DiskHealthReportText -Text $cells[$cellIndex] -Width $widths[$cellIndex])
+        $cellLines.Add($wrappedCell)
+        $rowHeight = [Math]::Max($rowHeight, $wrappedCell.Count)
+    }
+
+    $result = [System.Collections.Generic.List[string]]::new()
+    for ($lineIndex = 0; $lineIndex -lt $rowHeight; $lineIndex++) {
+        $line = [System.Text.StringBuilder]::new($indent)
+        for ($cellIndex = 0; $cellIndex -lt $cells.Count; $cellIndex++) {
+            $value = if ($lineIndex -lt $cellLines[$cellIndex].Count) { [string]$cellLines[$cellIndex][$lineIndex] } else { '' }
+            $alignRight = -not $isHeader -and $cellIndex -ge 2
+            $padded = if ($alignRight) { $value.PadLeft($widths[$cellIndex]) } else { $value.PadRight($widths[$cellIndex]) }
+            $null = $line.Append('| ' + $padded + ' ')
+        }
+        $null = $line.Append('|')
+        $result.Add($line.ToString())
+    }
+    return @($result)
+}
+
 function Get-DiskHealthReportAnsiColor {
     param([AllowEmptyString()][string]$Color)
 
@@ -1061,8 +1207,8 @@ function Get-DiskHealthReportDisplayLines {
     foreach ($row in $Rows) {
         $plainText = [string]$row.Text
         $trimmedStart = $plainText.TrimStart()
-        $wrapped = if ($Width -lt 104 -and ($trimmedStart.StartsWith('+') -or $trimmedStart.StartsWith('|'))) {
-            @(ConvertTo-DiskHealthCompactTableLines -Text $plainText -Width $Width)
+        $wrapped = if ($trimmedStart.StartsWith('+') -or $trimmedStart.StartsWith('|')) {
+            @(ConvertTo-DiskHealthAdaptiveTableLines -Text $plainText -Width $Width)
         }
         else {
             @(Split-DiskHealthReportText -Text $plainText -Width $Width)

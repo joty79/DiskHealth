@@ -5,6 +5,7 @@
 - `DiskHealth.ps1` is the canonical entrypoint. A no-argument launch must ask `💻 Local computer` or `🌐 Network computer (WinRM)` before performing any collection; the Local disk menu contains disks only. `ESC` navigates one level back in child menus and exits only from the main menu. `Get-DiskHealth.ps1` is compatibility-only.
 - Όλα τα interactive screens χρησιμοποιούν το vendored canonical `PS_UI_Blueprint.psm1` και επαληθεύουν το `PS_UI_Blueprint.sha256` στο startup. Μην επαναφέρετε cursor-position subtraction, partial redraw ή static `Write-Host` + blocking `ReadKey` report screen.
 - Το diagnostic report πρέπει να παράγεται μία φορά από την υπάρχουσα SMART λογική ως captured `HostInformationMessage` records και να αποδίδεται είτε από το responsive TUI είτε από το plain `-NoUI` replay. Μην δημιουργείτε δεύτερο diagnostic renderer με ξεχωριστούς health rules.
+- Το SMART table χρησιμοποιεί progressive responsive layout: natural table στο wide viewport, adaptive ίδιων στηλών με vertical cell wrapping στο medium viewport και stacked rows μόνο όταν δεν χωρά αναγνώσιμο table. Μην επαναφέρετε ένα απότομο breakpoint που αλλάζει ολόκληρο το visual model για διαφορά λίγων columns.
 - Κάθε αλλαγή TUI πρέπει να περάσει το DiskHealth sequential VT replay `120 -> 101 -> 100 -> 99 -> 98 -> 80 -> 60 -> 120`, με raw CRLF και zero wraps/scrolls/duplicate banners/stale frames.
 - Preserve raw S.M.A.R.T./NVMe values. Never replace an overflow, parse failure, or implausible counter with zero.
 - Separate remaining-life estimates from overall diagnostic status.
@@ -22,6 +23,14 @@
 - Do not query `Get-StorageReliabilityCounter` for USB storage. Use deterministic physical-drive mapping before slow smartctl identity probes, and retain `-Benchmark` phase evidence for performance regressions.
 
 ## Decision History
+
+### 2026-07-29 — Progressive SMART table reflow
+
+- **Problem:** Ακριβώς κάτω από το αρχικό `104`-column breakpoint, το πλήρες SMART table μετατρεπόταν απότομα σε τρεις stacked γραμμές ανά attribute. Η μεγάλη αλλαγή πυκνότητας και οριζόντιας θέσης έκανε το report δυσανάγνωστο παρότι υπήρχε ακόμη αρκετός χώρος για table.
+- **Root cause:** Ο πρώτος responsive renderer είχε μόνο δύο modes: untouched fixed-width table ή compact cards. Δεν υπήρχε ενδιάμεσο column layout με cell wrapping.
+- **Guardrail:** Διατηρούνται τρία modes. Wide κρατά το original table, medium υπολογίζει adaptive widths για τις ίδιες στήλες και τυλίγει cell text κατακόρυφα, truly narrow χρησιμοποιεί stacked fallback. Το transition κρίνεται από το ελάχιστο αναγνώσιμο table budget και όχι από ένα αυθαίρετο κοντινό breakpoint.
+- **Files affected:** `DiskHealth.ps1`, `tests\TuiResizeRegression.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
+- **Validation:** Pure render assertions στα `98/56/48` usable report columns, vertical wrapping fixture, sequential `pyte` replay `120→101→100→99→98→80→60→120` με zero wraps/scrolls/stale frames και focused Windows PowerShell 5.1 regression.
 
 ### 2026-07-28 — Canonical responsive TUI and buffered diagnostic report
 

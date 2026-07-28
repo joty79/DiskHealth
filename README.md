@@ -50,7 +50,7 @@ It queries native Windows PnP (`Get-PnpDeviceProperty`) telemetry to query **PCI
 
 It also parses exported CrystalDiskInfo txt reports, supporting both SATA and NVMe formats (automatically hiding useless columns, converting raw logs like Kelvin-to-Celsius/sectors-to-GB, and formatting all raw attributes in a readable decimal structure).
 
-Το interactive UI χρησιμοποιεί πλέον το pinned canonical `PS_UI_Blueprint.psm1`. Τα main/disk/network/dependency menus και το diagnostic report σχεδιάζονται ως πλήρη immediate-mode frames, με synchronized single-write output, live resize detection και height budgeting. Το report είναι scrollable με `↑/↓`, `PageUp/PageDown`, `Home/End`, ενώ σε στενό terminal οι fixed-width SMART tables μετατρέπονται σε compact stacked rows αντί να σπάνε από το Windows Terminal auto-wrap.
+Το interactive UI χρησιμοποιεί πλέον το pinned canonical `PS_UI_Blueprint.psm1`. Τα main/disk/network/dependency menus και το diagnostic report σχεδιάζονται ως πλήρη immediate-mode frames, με synchronized single-write output, live resize detection και height budgeting. Το report είναι scrollable με `↑/↓`, `PageUp/PageDown`, `Home/End`. Όταν μειώνεται το πλάτος, το SMART table διατηρεί πρώτα τις ίδιες στήλες και τυλίγει κάθε `Attribute`/`Value` κατακόρυφα μέσα στο row· compact stacked view χρησιμοποιείται μόνο σε πραγματικά πολύ στενό terminal.
 
 ```
 +--------------------+               WinRM Session               +----------------------+

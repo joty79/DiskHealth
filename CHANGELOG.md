@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.1] - 2026-07-29
+
+### Fixed
+- Αντικαταστάθηκε το απότομο switch από το κανονικό SMART table σε stacked cards ακριβώς κάτω από τα 104 columns. Το report κρατά πλέον adaptive 6-column table σε medium widths, στενεύει προοδευτικά τις στήλες και τυλίγει `Attribute`/`Value` σε επιπλέον γραμμές μέσα στο ίδιο row.
+- Το stacked fallback ενεργοποιείται μόνο όταν δεν χωρά πλέον ένα αναγνώσιμο table με τις έξι βασικές στήλες.
+
+### Tests
+- Προστέθηκαν assertions ότι στα `98` και `56` usable report columns (το `60`-column terminal contract point) το table/header παραμένει, ότι μεγάλο attribute name επεκτείνεται κατακόρυφα, και ότι μόνο το `48`-column fixture περνά σε stacked view.
+- Το sequential `pyte` replay και το focused Windows PowerShell 5.1 TUI regression πέρασαν με zero wraps, scrolls και stale frames.
+
 ## [1.24.0] - 2026-07-28
 
 ### Changed
