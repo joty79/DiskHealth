@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.2] - 2026-07-28
+
+### Fixed
+- Added a distinct `Phison` ATA telemetry profile for smartctl-recognized drives exposing `0xE7 SSD_Life_Left`.
+- A `Patriot Burst / SBFM61.3` no longer stops at `GOOD (N/A)`; its trusted raw `0xE7` value now produces `GOOD (99%)` while `0xF1` is labeled and displayed as lifetime writes in GiB.
+- Preserved the packed `0xAA Bad_Blk_Ct_Lat/Erl` value without falsely treating the combined raw number as a grown-bad-block count.
+
+### Tests
+- Added the live Phison attribute fixture and passed the full local suite plus a saved-credential end-to-end WinRM run against `192.168.1.222`.
+
 ## [1.23.1] - 2026-07-28
 
 ### Fixed

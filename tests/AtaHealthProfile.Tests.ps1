@@ -66,6 +66,28 @@ $burstProfile = Get-AtaTelemetryProfile -Model 'Patriot Burst Elite 240GB' -Firm
 Assert-Equal $burstProfile 'PatriotBurst' 'Patriot Burst profile classification'
 Assert-Equal (Get-AttributeName 0xA3 $burstProfile) 'Max PE Cycle' 'Patriot Burst A3 mapping remains distinct'
 
+# Live regression: Patriot Burst / SBFM61.3 from DESKTOP-RLT4E3M. The official
+# smartctl Phison profile identifies E7 as SSD_Life_Left and F1 as GiB written.
+$phisonFixture = @(
+    [PSCustomObject]@{ id = 0x01; name = 'Raw_Read_Error_Rate'; value = 100; raw = [PSCustomObject]@{ value = 0 } }
+    [PSCustomObject]@{ id = 0xA8; name = 'SATA_Phy_Error_Count'; value = 100; raw = [PSCustomObject]@{ value = 0 } }
+    [PSCustomObject]@{ id = 0xAA; name = 'Bad_Blk_Ct_Lat/Erl'; value = 100; raw = [PSCustomObject]@{ value = 60 } }
+    [PSCustomObject]@{ id = 0xAD; name = 'MaxAvgErase_Ct'; value = 100; raw = [PSCustomObject]@{ value = 1835067 } }
+    [PSCustomObject]@{ id = 0xE7; name = 'SSD_Life_Left'; value = 100; raw = [PSCustomObject]@{ value = 99 } }
+    [PSCustomObject]@{ id = 0xF1; name = 'Lifetime_Writes_GiB'; value = 100; raw = [PSCustomObject]@{ value = 2127 } }
+)
+$phisonProfile = Get-AtaTelemetryProfile -Model 'Patriot Burst' -Firmware 'SBFM61.3' -Attributes $phisonFixture
+Assert-Equal $phisonProfile 'Phison' 'Live Patriot Burst Phison classification'
+$parsedPhison = @(
+    New-ParsedAttributeFixture -Id 0xE7 -Raw 99
+    New-ParsedAttributeFixture -Id 0xF1 -Raw 2127
+)
+$phisonHealth = Get-AtaHealthEstimate -Profile $phisonProfile -Attributes $parsedPhison
+Assert-Equal $phisonHealth.IsTrusted $true 'Phison health trust'
+Assert-Equal $phisonHealth.Percentage 99 'Phison E7 health'
+Assert-Equal (Get-AttributeName 0xE7 $phisonProfile) 'SSD Life Left' 'Phison E7 mapping'
+Assert-Equal (Get-AttributeName 0xF1 $phisonProfile) 'Lifetime Writes (GiB)' 'Phison F1 mapping'
+
 # A generic B1 must never be silently presented as a trusted health percentage.
 $unknownFixture = @(New-ParsedAttributeFixture -Id 0xB1 -Raw 0 -Current 100)
 $unknownHealth = Get-AtaHealthEstimate -Profile 'Generic' -Attributes $unknownFixture

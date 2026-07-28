@@ -115,3 +115,11 @@
 - **Guardrail:** Resolve ATA telemetry from the complete attribute layout, not brand text or one ID. Keep `SiliconMotionOEM` and `PatriotBurst` profiles separate; for the OEM layout use raw `0xA9` as remaining life and treat `0xB1` only as total wear count. Never turn an unknown generic `0xB1` into a health percentage; show `N/A` when no trusted mapping exists.
 - **Files affected:** `DiskHealth.ps1`, `tests\AtaHealthProfile.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
 - **Validation:** Official smartmontools master database review; raw smartctl 7.5 collection through the canonical WinRMConnection 1.1.0 module; full local regression suite; live end-to-end run against `192.168.1.218` asserted `GOOD (91%)`, `0xA9` source, corrected SMI labels, and absence of stale `GOOD (100%)`.
+
+### 2026-07-28 — Patriot brand does not imply one controller layout
+
+- **Problem:** A live `Patriot Burst / SBFM61.3` target remained at `GOOD (N/A)` even though smartctl recognized it and exposed `0xE7 SSD_Life_Left = 99`.
+- **Root cause:** The controller-profile resolver covered the two previously observed A9-based layouts but not the separate official Phison-driven Patriot Burst layout.
+- **Guardrail:** Prefer an explicit smartctl database attribute identity over brand inference. Classify a plausible `0xE7` named `SSD_Life_Left` as `Phison`, use its raw `0–100` value as remaining life, and retain model/firmware only as a bounded fallback. Preserve packed Phison `0xAA Bad_Blk_Ct_Lat/Erl`; do not interpret the combined raw field as a single failure count.
+- **Files affected:** `DiskHealth.ps1`, `tests\AtaHealthProfile.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
+- **Validation:** Official smartmontools Phison drive-database entry, raw smartctl 7.5 JSON through WinRMConnection 1.1.0, local regression fixture, and live end-to-end assertions against `192.168.1.222` for `GOOD (99%)`, `0xE7` source, Phison notes, lifetime writes, and removal of stale `N/A`.

@@ -718,7 +718,9 @@ function Get-AtaTelemetryProfile {
     if ($Model -match '(?i)SanDisk|Western Digital|\bWDC\b|\bWD\s') { return 'SanDisk' }
 
     $ids = @{}
+    $names = @{}
     $a9Raw = $null
+    $e7Raw = $null
     foreach ($attribute in @($Attributes)) {
         if ($null -eq $attribute) { continue }
 
@@ -727,6 +729,8 @@ function Get-AtaTelemetryProfile {
 
         $id = [int]$idProperty.Value
         $ids[$id] = $true
+        $nameProperty = if ($attribute.PSObject.Properties['name']) { $attribute.PSObject.Properties['name'] } elseif ($attribute.PSObject.Properties['Name']) { $attribute.PSObject.Properties['Name'] } else { $null }
+        if ($nameProperty) { $names[$id] = [string]$nameProperty.Value }
         if ($id -eq 0xA9) {
             if ($attribute.PSObject.Properties['raw'] -and $null -ne $attribute.raw) {
                 if ($attribute.raw.PSObject.Properties['value']) { $a9Raw = [long]$attribute.raw.value }
@@ -737,14 +741,31 @@ function Get-AtaTelemetryProfile {
                 $a9Raw = [long]$attribute.RawVal
             }
         }
+        if ($id -eq 0xE7) {
+            if ($attribute.PSObject.Properties['raw'] -and $null -ne $attribute.raw) {
+                if ($attribute.raw.PSObject.Properties['value']) { $e7Raw = [long]$attribute.raw.value }
+                else { $e7Raw = [long]$attribute.raw }
+            } elseif ($attribute.PSObject.Properties['Raw']) {
+                $e7Raw = [long]$attribute.Raw
+            } elseif ($attribute.PSObject.Properties['RawVal']) {
+                $e7Raw = [long]$attribute.RawVal
+            }
+        }
     }
 
     $hasPlausibleA9Lifetime = ($null -ne $a9Raw -and $a9Raw -ge 0 -and $a9Raw -le 100)
+    $hasPlausibleE7Lifetime = ($null -ne $e7Raw -and $e7Raw -ge 0 -and $e7Raw -le 100)
     $smiOemIds = @(0xA0, 0xA1, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xB1, 0xB2)
     $smiOemMatches = @($smiOemIds | Where-Object { $ids.ContainsKey($_) }).Count
     $patriotBurstIds = @(0xA1, 0xA2, 0xA3, 0xA4, 0xA6, 0xA7, 0xA8, 0xA9, 0xAB, 0xAC, 0xAE, 0xCE, 0xCF)
     $patriotBurstMatches = @($patriotBurstIds | Where-Object { $ids.ContainsKey($_) }).Count
 
+    if ($hasPlausibleE7Lifetime -and $names.ContainsKey(0xE7) -and $names[0xE7] -match '(?i)SSD[_ ]Life[_ ]Left|Life(?:time)?[_ ]Left') {
+        return 'Phison'
+    }
+    if ($hasPlausibleE7Lifetime -and $Model -match '(?i)^Patriot Burst(?:\s|$)' -and $Firmware -match '(?i)^S[AB]FM') {
+        return 'Phison'
+    }
     if ($hasPlausibleA9Lifetime -and $patriotBurstMatches -ge 10 -and $ids.ContainsKey(0xAB) -and $ids.ContainsKey(0xAC)) {
         return 'PatriotBurst'
     }
@@ -787,6 +808,13 @@ function Get-AtaHealthEstimate {
         if ($wear -and $null -ne $wear.Raw -and [long]$wear.Raw -ge 0 -and [long]$wear.Raw -le 100) {
             $result.Percentage = [int]$wear.Raw
             $result.Source = 'Remaining Lifetime Percentage (0xA9 raw)'
+            $result.IsTrusted = $true
+        }
+    } elseif ($Profile -eq 'Phison') {
+        $wear = $Attributes | Where-Object { $_.ID -eq 0xE7 } | Select-Object -First 1
+        if ($wear -and $null -ne $wear.Raw -and [long]$wear.Raw -ge 0 -and [long]$wear.Raw -le 100) {
+            $result.Percentage = [int]$wear.Raw
+            $result.Source = 'SSD Life Left (0xE7 raw)'
             $result.IsTrusted = $true
         }
     }
@@ -860,6 +888,17 @@ function Get-AttributeName {
             0xF1 { return "Write Life Time" }
             0xF2 { return "Read Life Time" }
             0xF9 { return "Total GB Written to NAND (TLC)" }
+        }
+    }
+    elseif ($brand -eq 'Phison') {
+        switch ($id) {
+            0xA8 { return "SATA PHY Error Count" }
+            0xAA { return "Bad Block Count (Later/Early)" }
+            0xAD { return "Maximum/Average Erase Count" }
+            0xC0 { return "Unsafe Shutdown Count" }
+            0xDA { return "CRC Error Count" }
+            0xE7 { return "SSD Life Left" }
+            0xF1 { return "Lifetime Writes (GiB)" }
         }
     }
     elseif ($brand -eq "SanDisk") {
@@ -2637,6 +2676,21 @@ while ($runLoop) {
             if ($waf -gt 3) {
                 Write-Host "     (Υψηλό WAF: Ο controller γράφει πολύ περισσότερα δεδομένα στη NAND λόγω garbage collection.)" -ForegroundColor $Yellow
             }
+        }
+    }
+
+    if ($brand -eq 'Phison') {
+        $lifeE7 = $attributes | Where-Object { $_.ID -eq 0xE7 } | Select-Object -First 1
+        $writesF1 = $attributes | Where-Object { $_.ID -eq 0xF1 } | Select-Object -First 1
+
+        Write-Host "`n  🔵 Ειδική Παρατήρηση Phison profile:" -ForegroundColor $Cyan
+        if ($lifeE7) {
+            Write-Host "  🔸 Η υπολειπόμενη ζωή (SSD Life Left) είναι " -NoNewline -ForegroundColor $White
+            Write-Host "$($lifeE7.Raw)%" -ForegroundColor $Yellow
+        }
+        if ($writesF1) {
+            Write-Host "  🔸 Lifetime Writes: " -NoNewline -ForegroundColor $White
+            Write-Host "$($writesF1.Raw) GiB" -ForegroundColor $Gray
         }
     }
 
