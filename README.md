@@ -183,6 +183,13 @@ For SATA drives, the script retrieves the raw 512-byte array from `MSStorageDriv
 </details>
 
 <details>
+<summary><b>Why can Seagate Raw Read Error Rate show a very large raw number?</b></summary>
+
+For Seagate HDDs, the raw fields of `0x01 Raw Read Error Rate`, `0x07 Seek Error Rate`, and `0xC3 Hardware ECC Recovered` are proprietary vendor telemetry and must not be read as standalone totals of failed operations. DiskHealth evaluates these rate attributes from the normalized `Current` value against the firmware `Threshold`, while also enforcing the independent SMART overall result. Actual media-risk counters such as reallocated, pending, and offline-uncorrectable sectors remain separate checks.
+
+</details>
+
+<details>
 <summary><b>How does smartctl JSON Integration work?</b></summary>
 
 If the drive is NVMe and **smartctl** is present, the script queries properties via JSON schema:

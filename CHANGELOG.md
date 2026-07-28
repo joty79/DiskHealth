@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.6] - 2026-07-28
+
+### Fixed
+- Seagate HDD attributes `0x01 Raw Read Error Rate`, `0x07 Seek Error Rate`, and `0xC3 Hardware ECC Recovered` no longer turn yellow merely because their proprietary raw telemetry is non-zero.
+- These attributes are now colored from their normalized `Current` value against the firmware `Threshold`; a real threshold crossing remains red and the overall SMART result remains independently enforced.
+- Healthy Seagate reports now explain that the `01/07/C3` raw fields are vendor telemetry, not standalone counts of failed reads or seeks.
+
+### Tests
+- Added the live `ST8000DM004-2U9188` normalized values (`01: 80/6`, `07: 72/45`, `C3: 80/0`) and a threshold-crossing regression fixture.
+- Passed all eight local regression/integration suites, Windows PowerShell 5.1 compatibility, PSScriptAnalyzer with zero errors, and an elevated end-to-end WinRM run against `NEOS / 192.168.1.6`. Live smartctl independently confirmed `SMART PASSED`, zero logged errors, and zero `05/BB/C5/C6/C7` counters.
+
 ## [1.23.5] - 2026-07-28
 
 ### Fixed

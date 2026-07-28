@@ -149,3 +149,11 @@
 - **Guardrail:** Build native winget arguments as a flat PowerShell array. Query remote `winget install --help` and append optional switches only when advertised; never version-guess or pass all arguments as one nested array. Preserve the official package ID, exact matching, winget source, machine scope, and silent mode.
 - **Files affected:** `DiskHealth.ps1`, `tests\ToolingPolicy.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
 - **Validation:** Parser and executable winget 1.3/current help fixtures passed; local modern winget produced a flat 10-item argument array with the supported switch. Live reinstall was not verified because the affected `192.168.1.221` target stopped accepting TCP 5985 after three bounded attempts.
+
+### 2026-07-28 — Seagate raw rate fields are not portable error totals
+
+- **Problem:** A healthy `ST8000DM004-2U9188` displayed `0x01 Raw Read Error Rate` in yellow because its proprietary raw value was non-zero, even though `Current 80` remained far above `Threshold 6`, SMART passed, and `05/C5/C6/BB` were all zero.
+- **Root cause:** Generic ATA table coloring treated every non-zero `0x01` raw value as an error count. Seagate's individual attribute meanings and raw encodings are vendor-specific.
+- **Guardrail:** For recognized Seagate HDDs, evaluate `01/07/C3` only from normalized `Current` versus `Threshold`; never infer a failed-read/seek total from the raw field. Keep overall SMART and explicit reallocated/pending/uncorrectable counters as independent checks.
+- **Files affected:** `DiskHealth.ps1`, `tests\AtaTelemetry.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
+- **Validation:** All eight local regression/integration suites, Windows PowerShell 5.1 focused compatibility, PSScriptAnalyzer error review, and an elevated end-to-end WinRM run against `NEOS / 192.168.1.6` passed. Independent live smartctl evidence confirmed `SMART PASSED`, zero logged errors, and zero `05/BB/C5/C6/C7` counters; the disk has no recorded self-tests.

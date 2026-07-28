@@ -739,6 +739,33 @@ function Get-AtaPowerOnHoursValue {
     return $null
 }
 
+function Get-SeagateNormalizedRateState {
+    param(
+        [int]$AttributeId,
+        [int]$Current,
+        [int]$Threshold,
+        [bool]$IsSeagateHdd
+    )
+
+    # Seagate documents individual ATA SMART attributes as proprietary. In
+    # particular, the non-zero raw fields for 01/07/C3 are not portable error
+    # totals. Only the normalized value against its firmware threshold is safe
+    # to use here; the overall SMART result remains an independent guard.
+    if (-not $IsSeagateHdd -or $AttributeId -notin @(0x01, 0x07, 0xC3)) {
+        return 'NotApplicable'
+    }
+
+    if ($Threshold -le 0) {
+        return 'Neutral'
+    }
+
+    if ($Current -le $Threshold) {
+        return 'Critical'
+    }
+
+    return 'Normal'
+}
+
 # Επιλογή ATA telemetry profile από model/firmware και, κυρίως, από το πραγματικό
 # attribute layout. Το brand μόνο του δεν αρκεί: διαφορετικά Patriot/Intenso SSDs
 # χρησιμοποιούν διαφορετικούς controllers και διαφορετική σημασία για τα ίδια IDs.
@@ -2149,6 +2176,7 @@ while ($runLoop) {
         $disk.MediaType -match '(?i)HDD|Hard Disk' -or
         $disk.RotationRate -match '^\s*\d+\s*RPM'
     )
+    $isSeagateHdd = $isRotationalMedia -and $disk.Model -match '(?i)^(?:ST\d|Seagate)'
 
     Write-Host "### 🔵 Στοιχεία Δίσκου (Index: $($disk.Index))" -ForegroundColor $Cyan
     Write-Host "  🔸 Μοντέλο: " -NoNewline -ForegroundColor $White
@@ -2600,6 +2628,9 @@ while ($runLoop) {
     if ($status -eq "GOOD") {
         if ($isRotationalMedia) {
             Write-Host "  🔸 Οι μηχανικοί HDD δεν διαθέτουν τυποποιημένο wear/health percentage. Η αξιολόγηση βασίζεται στο SMART overall status, στα thresholds και στους κρίσιμους raw counters." -ForegroundColor $Gray
+            if ($isSeagateHdd) {
+                Write-Host "  🔸 Seagate 01/07/C3: τα raw πεδία είναι proprietary vendor telemetry, όχι αυτόνομα totals κατεστραμμένων reads/seeks. Αξιολογούνται από Current έναντι Threshold και το SMART overall result." -ForegroundColor $Gray
+            }
         } elseif ($null -eq $health) {
             Write-Host "  🔸 Το SMART overall status είναι επιτυχές, αλλά δεν υπάρχει αξιόπιστο vendor mapping για ποσοστό ζωής NAND." -ForegroundColor $Gray
         } else {
@@ -2679,7 +2710,12 @@ while ($runLoop) {
         # Coloring
         $lineColor = $Gray
         if ($brand -ne "NVMe") {
-            if ($brand -eq 'SanDisk') {
+            $seagateRateState = Get-SeagateNormalizedRateState -AttributeId $attr.ID -Current $attr.Current -Threshold $attr.Threshold -IsSeagateHdd $isSeagateHdd
+            if ($seagateRateState -ne 'NotApplicable') {
+                if ($seagateRateState -eq 'Critical') { $lineColor = $Red }
+                elseif ($seagateRateState -eq 'Normal') { $lineColor = $Green }
+                else { $lineColor = $Gray }
+            } elseif ($brand -eq 'SanDisk') {
                 $sanDiskErrorIds = @(0x05, 0xAA, 0xAB, 0xAC, 0xB8, 0xBB, 0xBC, 0xC4, 0xC5, 0xC6)
                 if ($attr.ID -in $sanDiskErrorIds) {
                     $lineColor = if ($attr.Raw -gt 0) { $Yellow } else { $Green }
