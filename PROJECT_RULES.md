@@ -5,6 +5,7 @@
 - `DiskHealth.ps1` is the canonical entrypoint. A no-argument launch must ask `💻 Local computer` or `🌐 Network computer (WinRM)` before performing any collection; the Local disk menu contains disks only. `ESC` navigates one level back in child menus and exits only from the main menu. `Get-DiskHealth.ps1` is compatibility-only.
 - Preserve raw S.M.A.R.T./NVMe values. Never replace an overflow, parse failure, or implausible counter with zero.
 - Separate remaining-life estimates from overall diagnostic status.
+- For recognized WD/SanDisk SATA SSDs, label raw `0xE8` as `Reserve n%`; never present it as a proprietary overall-health score. Treat `0xAA` as grown bad blocks, and do not infer ongoing degradation or immediate replacement from a single stable retired-block snapshot.
 - Use `REVIEW` when telemetry is internally inconsistent and evidence is insufficient for either a healthy or failed conclusion.
 - USB bridge protocols normally come from `smartctl --scan-open`; do not brute-force controller-specific `-d` values. A controller-specific override is allowed only for an exact, evidence-backed USB VID:PID allowlist entry and must still produce a valid ATA/NVMe health payload.
 - Tool installation is opt-in. A diagnostic read must not silently download or install dependencies.
@@ -17,6 +18,14 @@
 - Do not query `Get-StorageReliabilityCounter` for USB storage. Use deterministic physical-drive mapping before slow smartctl identity probes, and retain `-Benchmark` phase evidence for performance regressions.
 
 ## Decision History
+
+### 2026-07-28 — WD/SanDisk reserve percentage and retired-block severity
+
+- **Problem:** A live `WDC WDS120G2G0A-00JH30` report showed `CAUTION (N/A)` and demanded immediate replacement, while Hard Disk Sentinel showed 94% and the raw SMART data showed six grown/reassigned blocks, 95% available reserve, zero program/erase/uncorrectable errors, and passed overall SMART.
+- **Root cause:** The WD attribute map mislabeled `0xA7`, `0xA8`, `0xAA`, `0xE9`, `0xEA`, `0xF1`, `0xF2`, and `0xF4`; `0xE8` was not used as a labeled reserve metric; and every `CAUTION` shared an unconditional replacement message that confused historical block retirement with active media errors.
+- **Guardrail:** Use the smartmontools WD/SanDisk mapping for recognized WDS/SanDisk SSD models, expose `0xE8` as `Reserve n%`, keep `CAUTION` independent from the metric, and require trend/self-test or active errors before recommending replacement. Never classify every `WDC` model as a SanDisk-profile SSD.
+- **Files affected:** `DiskHealth.ps1`, `tests\AtaHealthProfile.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
+- **Validation:** Official smartmontools drive-database mapping review; full eight-file local regression suite; live saved-credential WinRM run against `192.168.1.221` with admin verification and smartctl 7.5, producing `CAUTION (Reserve 95%)`, six grown/reassigned blocks, and no immediate-replacement claim.
 
 ### 2026-07-28 — Interactive dependency choice, automation flags second
 

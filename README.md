@@ -158,6 +158,7 @@ DiskHealth/
 ├── DiskHealth.ps1                       # Canonical interactive and CLI entrypoint
 ├── Get-DiskHealth.ps1                   # Backward-compatible launcher
 ├── tests/
+│   ├── AtaHealthProfile.Tests.ps1       # Controller profile, health-source, and WD mapping fixtures
 │   ├── AtaTelemetry.Tests.ps1           # Packed ATA temperature regression fixtures
 │   ├── NvmeTelemetry.Tests.ps1          # Regression fixtures for 128-bit NVMe counters
 │   ├── SmartctlBridgeMapping.Tests.ps1   # Windows PhysicalDrive and USB/UASP bridge mapping
@@ -226,13 +227,13 @@ It converts raw hexadecimal values automatically:
 <details>
 <summary><b>How is the Health Status determined?</b></summary>
 
-For Samsung SSDs, the health % can use the normalized **Wear Leveling Count (0xB1)**. Confirmed Silicon Motion OEM and Patriot Burst layouts use raw **Remaining Lifetime Percentage (0xA9)**. Smartctl-recognized Phison layouts use raw **SSD Life Left (0xE7)**, while NVMe uses **Percentage Used (0x05)**. A generic ATA `0xB1` is not trusted automatically: if the controller layout is unknown, DiskHealth reports `N/A` for the percentage while keeping the independent SMART overall status and failure indicators visible.
+For Samsung SSDs, the health % can use the normalized **Wear Leveling Count (0xB1)**. Confirmed Silicon Motion OEM and Patriot Burst layouts use raw **Remaining Lifetime Percentage (0xA9)**. Smartctl-recognized Phison layouts use raw **SSD Life Left (0xE7)**, while NVMe uses **Percentage Used (0x05)**. Recognized WD/SanDisk SATA SSD layouts display raw **Available Reserved Space (0xE8)** explicitly as `Reserve n%`; this is a vendor reserve/endurance metric, not a clone of another program's proprietary overall-health formula. A generic ATA `0xB1` is not trusted automatically: if the controller layout is unknown, DiskHealth reports `N/A` for the percentage while keeping the independent SMART overall status and failure indicators visible.
 
 The distinction matters for OEM drives with generic names. A live `SSD 120GB / U0510A0` sample was absent from the smartctl drive database but exposed the complete Silicon Motion OEM signature: `0xA9 = 91` was remaining life, whereas `0xB1` was a separate total-wear counter whose normalized value happened to be `100`.
 
 A separate live `Patriot Burst / SBFM61.3` sample is an officially recognized Phison-driven SSD. Its `0xE7 SSD_Life_Left = 99` is used as the trusted percentage and `0xF1 Lifetime_Writes_GiB` is reported without unit conversion. Its packed `0xAA Bad_Blk_Ct_Lat/Erl` raw field is preserved rather than misreported as a single bad-block count.
 
-If critical degradation values (like reallocated sectors, pending sectors, or uncorrectable read/write events) are above zero, the health status is automatically set to `CAUTION` (or `BAD`), breaking the common firmware illusion of reporting a "Good" status based on remaining writes alone.
+If critical degradation values (like reallocated sectors, pending sectors, or uncorrectable read/write events) are above zero, the health status is automatically set to `CAUTION` (or `BAD`), breaking the common firmware illusion of reporting a "Good" status based on remaining writes alone. `CAUTION` does not automatically mean immediate replacement: retired blocks without current program/erase/uncorrectable errors require backup, an extended SMART self-test, and a later comparison against the saved baseline. A failed self-test, increasing counters, threshold crossing, or active data errors justifies escalation.
 
 </details>
 
@@ -240,13 +241,13 @@ If critical degradation values (like reallocated sectors, pending sectors, or un
 <summary><b>How do we detect new bad blocks in SanDisk / WD Green SSDs? (Factory vs Grown Bad Blocks)</b></summary>
 
 For SanDisk and Western Digital (WD) SATA SSDs (e.g., WD Green series), S.M.A.R.T. telemetry maps attributes differently:
-- **0xA9 (Total Bad Blocks)**: Represents the total bad block count. Almost all SSDs have some bad blocks from the factory (Factory Bad Blocks / Initial Bad Blocks) that were isolated during production testing. This number is safe as long as it remains static and grown bad blocks are zero.
-- **0xAA (Reserve Block Count)**: Represents the number of retired blocks during the drive's operational lifetime. This is the primary indicator of **Grown Bad Blocks**. It should ideally be `0`.
+- **0xA9 (Total Bad Blocks)**: Represents the vendor's total bad-block count. It is not, by itself, enough to distinguish factory-isolated blocks from later operational degradation.
+- **0xAA (Grown Bad Blocks)**: Represents blocks retired during the drive's operational lifetime. This is the direct **Grown Bad Blocks** indicator and should ideally be `0`.
 - **0x05 (Reallocated Sectors Count)**: Represents reallocated sectors. Increases when data is moved from failing blocks to reserved areas. It should ideally be `0`.
 - **0xAB (Program Fail Count)** and **0xAC (Erase Fail Count)**: Count failures when writing to or erasing NAND flash pages. A value above `0` indicates active blocks degrading during operation.
-- **0xE8 (Available Reserved Space)**: Represents the remaining spare reserve blocks percentage (starting at `100%`). If this falls below `100%`, it indicates the drive is using its reserves to replace failing blocks.
+- **0xE8 (Available Reserved Space)**: Represents the vendor reserve/endurance percentage. DiskHealth labels this `Reserve n%` rather than presenting it as a proprietary total-health score.
 
-The script automatically displays custom notes for SanDisk/WD SSDs. If `Total Bad Blocks (0xA9)` is above zero, but `Reserve Block Count (0xAA)` and `Reallocated Sectors Count (0x05)` are zero, the script identifies these as **100% factory-isolated bad blocks** and reports the drive as healthy. If any grown blocks or fail counts are detected, the telemetry values are highlighted in **Yellow (Caution)** or **Red (Critical)** to warn of active degradation.
+The script automatically displays custom notes for recognized SanDisk/WD SSD layouts. If `0xAA` or `0x05` is above zero, it reports recorded block retirement as `CAUTION`; it does not claim that the degradation is currently accelerating from one snapshot. Current program, erase, pending, or uncorrectable errors are reported separately, while threshold crossings remain `BAD`. Broad `WDC` branding alone is never enough to apply these SSD mappings to a WD hard disk.
 
 </details>
 

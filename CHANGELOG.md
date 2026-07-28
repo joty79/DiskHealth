@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.4] - 2026-07-28
+
+### Fixed
+- Corrected the smartmontools-backed WD/SanDisk SATA SSD mappings for P/E cycles, grown bad blocks, TLC/SLC NAND writes, host reads/writes, and temperature throttling.
+- Recognized WD/SanDisk `0xE8 Available Reserved Space` is now displayed transparently as `Reserve n%`; it is not presented as Hard Disk Sentinel's proprietary overall-health percentage.
+- A retired-block-only `CAUTION` no longer claims active media errors or mandates immediate replacement. It now requests backup, an extended SMART self-test, and a later baseline comparison, escalating only for increasing counters, active data errors, or a failed self-test.
+- Narrowed WD/SanDisk SSD profile detection so generic `WDC` hard disks cannot inherit the SSD-specific attribute map.
+
+### Tests
+- Added the live `WDC WDS120G2G0A-00JH30 / UE220400` fixture and a WD HDD false-positive guard.
+- Passed all eight local regression/integration files and a saved-credential end-to-end WinRM run against `192.168.1.221`; the live result was `CAUTION (Reserve 95%)` with six grown/reassigned blocks and zero program/erase/uncorrectable errors.
+
 ## [1.23.3] - 2026-07-28
 
 ### Fixed

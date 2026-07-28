@@ -715,7 +715,10 @@ function Get-AtaTelemetryProfile {
     )
 
     if ($Model -match '(?i)SAMSUNG') { return 'Samsung' }
-    if ($Model -match '(?i)SanDisk|Western Digital|\bWDC\b|\bWD\s') { return 'SanDisk' }
+    # Do not classify every WDC/WD model as this SSD family: WD HDDs use unrelated
+    # attribute layouts. WDS model numbers and explicit SanDisk/WD SSD names are
+    # the reliable model hints for the shared WD/SanDisk SATA SSD mapping.
+    if ($Model -match '(?i)SanDisk|(?:^|\s)WDC?\s+WDS\d|^WDS\d|WD\s+(?:Green|Blue|Red).*SSD|Western Digital.*SSD') { return 'SanDisk' }
 
     $ids = @{}
     $names = @{}
@@ -793,6 +796,7 @@ function Get-AtaHealthEstimate {
     $result = [ordered]@{
         Percentage = $null
         Source = 'No trusted vendor wear attribute'
+        MetricLabel = 'Health'
         IsTrusted = $false
     }
 
@@ -815,6 +819,14 @@ function Get-AtaHealthEstimate {
         if ($wear -and $null -ne $wear.Raw -and [long]$wear.Raw -ge 0 -and [long]$wear.Raw -le 100) {
             $result.Percentage = [int]$wear.Raw
             $result.Source = 'SSD Life Left (0xE7 raw)'
+            $result.IsTrusted = $true
+        }
+    } elseif ($Profile -eq 'SanDisk') {
+        $reserve = $Attributes | Where-Object { $_.ID -eq 0xE8 } | Select-Object -First 1
+        if ($reserve -and $null -ne $reserve.Raw -and [long]$reserve.Raw -ge 0 -and [long]$reserve.Raw -le 100) {
+            $result.Percentage = [int]$reserve.Raw
+            $result.Source = 'Available Reserved Space (0xE8 raw)'
+            $result.MetricLabel = 'Reserve'
             $result.IsTrusted = $true
         }
     }
@@ -903,20 +915,23 @@ function Get-AttributeName {
     }
     elseif ($brand -eq "SanDisk") {
         switch ($id) {
-            0xA5 { return "TLC Block Write/Erase Count" }
-            0xA6 { return "Minimum Erase Count" }
-            0xA7 { return "Maximum Erase Count" }
-            0xA8 { return "SATA PHY Error Count" }
+            0xA5 { return "Block Erase Count" }
+            0xA6 { return "Minimum P/E Cycles (TLC)" }
+            0xA7 { return "Max Bad Blocks per Die" }
+            0xA8 { return "Maximum P/E Cycles (TLC)" }
             0xA9 { return "Total Bad Blocks" }
-            0xAA { return "Reserve Block Count" }
+            0xAA { return "Grown Bad Blocks" }
             0xAB { return "Program Fail Count" }
             0xAC { return "Erase Fail Count" }
-            0xAD { return "Average Erase Count" }
+            0xAD { return "Average P/E Cycles (TLC)" }
             0xAE { return "Unexpected Power Loss Count" }
             0xE6 { return "Media Wearout Indicator" }
             0xE8 { return "Available Reserved Space" }
-            0xEA { return "Total NAND GB Written" }
-            0xF4 { return "Total NAND GB Written (Host)" }
+            0xE9 { return "NAND GB Written (TLC)" }
+            0xEA { return "NAND GB Written (SLC)" }
+            0xF1 { return "Host Writes (GiB)" }
+            0xF2 { return "Host Reads (GiB)" }
+            0xF4 { return "Temperature Throttle Status" }
         }
     }
     elseif ($brand -eq "NVMe") {
@@ -2368,6 +2383,7 @@ while ($runLoop) {
     # 5. Υπολογισμός Υγείας (Health Calculation)
     $health = $null
     $healthSource = "No trusted vendor wear attribute"
+    $healthMetricLabel = "Health"
 
     $wearB1 = $attributes | Where-Object { $_.ID -eq 0xB1 }
     $wearE9 = $attributes | Where-Object { $_.ID -eq 0xE9 }
@@ -2382,6 +2398,7 @@ while ($runLoop) {
         if ($ataHealth.IsTrusted) {
             $health = $ataHealth.Percentage
             $healthSource = $ataHealth.Source
+            $healthMetricLabel = $ataHealth.MetricLabel
         }
     }
 
@@ -2394,6 +2411,9 @@ while ($runLoop) {
     $reallocEventC4 = $attributes | Where-Object { $_.ID -eq 0xC4 }
     $pendingC5 = $attributes | Where-Object { $_.ID -eq 0xC5 }
     $uncorrectableC6 = $attributes | Where-Object { $_.ID -eq 0xC6 }
+    $grownBadAA = $attributes | Where-Object { $_.ID -eq 0xAA }
+    $programFailAB = $attributes | Where-Object { $_.ID -eq 0xAB }
+    $eraseFailAC = $attributes | Where-Object { $_.ID -eq 0xAC }
 
     $nvmeCriticalWarning = $attributes | Where-Object { $_.ID -eq 0x01 }
     $nvmeMediaErrors = $attributes | Where-Object { $_.ID -eq 0x0E }
@@ -2403,9 +2423,18 @@ while ($runLoop) {
     $statusIcon = "✅"
     $cautionReasons = @()
     $badReasons = @()
+    $retiredBlocksOnly = $false
+    $hasActiveMediaErrors = $false
 
     if ($brand -ne "NVMe") {
-        if ($reallocated -and $reallocated.Raw -gt 0) {
+        if ($brand -eq 'SanDisk' -and (($reallocated -and $reallocated.Raw -gt 0) -or ($grownBadAA -and $grownBadAA.Raw -gt 0))) {
+            $status = "CAUTION"
+            $statusColor = $Yellow
+            $statusIcon = "⚠️"
+            $grownCount = [Math]::Max($(if ($reallocated) { [long]$reallocated.Raw } else { 0 }), $(if ($grownBadAA) { [long]$grownBadAA.Raw } else { 0 }))
+            $cautionReasons += "Grown/reassigned NAND blocks ($grownCount)"
+            $retiredBlocksOnly = $true
+        } elseif ($reallocated -and $reallocated.Raw -gt 0) {
             $status = "CAUTION"
             $statusColor = $Yellow
             $statusIcon = "⚠️"
@@ -2416,6 +2445,7 @@ while ($runLoop) {
             $statusColor = $Yellow
             $statusIcon = "⚠️"
             $cautionReasons += "Uncorrectable Sectors Read/Write ($($uncorrectableA0.Raw))"
+            $hasActiveMediaErrors = $true
         }
         if ($runtimeB2 -and $runtimeB2.Raw -gt 0) {
             $status = "CAUTION"
@@ -2434,6 +2464,7 @@ while ($runLoop) {
             $statusColor = $Yellow
             $statusIcon = "⚠️"
             $cautionReasons += "Reported Uncorrectable Errors ($($uncorrectableBB.Raw))"
+            $hasActiveMediaErrors = $true
         }
         if ($reallocEventC4 -and $reallocEventC4.Raw -gt 0) {
             $status = "CAUTION"
@@ -2446,12 +2477,28 @@ while ($runLoop) {
             $statusColor = $Yellow
             $statusIcon = "⚠️"
             $cautionReasons += "Current Pending Sectors ($($pendingC5.Raw))"
+            $hasActiveMediaErrors = $true
         }
         if ($uncorrectableC6 -and $uncorrectableC6.Raw -gt 0) {
             $status = "CAUTION"
             $statusColor = $Yellow
             $statusIcon = "⚠️"
             $cautionReasons += "Offline Uncorrectable Errors ($($uncorrectableC6.Raw))"
+            $hasActiveMediaErrors = $true
+        }
+        if ($brand -eq 'SanDisk' -and $programFailAB -and $programFailAB.Raw -gt 0) {
+            $status = "CAUTION"
+            $statusColor = $Yellow
+            $statusIcon = "⚠️"
+            $cautionReasons += "Program Fail Count ($($programFailAB.Raw))"
+            $hasActiveMediaErrors = $true
+        }
+        if ($brand -eq 'SanDisk' -and $eraseFailAC -and $eraseFailAC.Raw -gt 0) {
+            $status = "CAUTION"
+            $statusColor = $Yellow
+            $statusIcon = "⚠️"
+            $cautionReasons += "Erase Fail Count ($($eraseFailAC.Raw))"
+            $hasActiveMediaErrors = $true
         }
 
         # Threshold crossings check
@@ -2506,7 +2553,7 @@ while ($runLoop) {
     Write-Host "  $statusIcon Κατάσταση: " -NoNewline -ForegroundColor $White
     Write-Host "$status " -NoNewline -ForegroundColor $statusColor
     Write-Host "(" -NoNewline -ForegroundColor $White
-    $healthDisplay = if ($null -eq $health) { 'N/A' } else { "$health%" }
+    $healthDisplay = if ($null -eq $health) { 'N/A' } elseif ($healthMetricLabel -eq 'Health') { "$health%" } else { "$healthMetricLabel $health%" }
     Write-Host $healthDisplay -NoNewline -ForegroundColor $healthPercentColor
     Write-Host ")" -ForegroundColor $White
 
@@ -2528,7 +2575,10 @@ while ($runLoop) {
         foreach ($r in $cautionReasons) {
             Write-Host "     - $r" -ForegroundColor $Yellow
         }
-        Write-Host "  🔸 Συνιστάται η άμεση λήψη αντιγράφων ασφαλείας (backup) και η στενή παρακολούθηση των τιμών." -ForegroundColor $Gray
+        if ($brand -eq 'SanDisk' -and $retiredBlocksOnly -and -not $hasActiveMediaErrors) {
+            Write-Host "  🔸 Καταγράφηκε ιστορική απόσυρση NAND blocks, αλλά όχι τρέχον uncorrectable/program/erase error σε αυτό το snapshot." -ForegroundColor $Gray
+        }
+        Write-Host "  🔸 Συνιστάται άμεσο backup, SMART self-test και αποθήκευση baseline για έλεγχο αν οι μετρητές αυξάνονται." -ForegroundColor $Gray
     } else {
         Write-Host "  🚨 ΚΡΙΣΙΜΟ: Ο δίσκος έχει ξεπεράσει τα όρια ασφαλείας του firmware!" -ForegroundColor $Red
         foreach ($r in $badReasons) {
@@ -2580,25 +2630,36 @@ while ($runLoop) {
         # Coloring
         $lineColor = $Gray
         if ($brand -ne "NVMe") {
-            $isCriticalAttr = ($attr.ID -eq 0x01 -or $attr.ID -eq 0x05 -or $attr.ID -eq 0xA0 -or $attr.ID -eq 0xA1 -or $attr.ID -eq 0xB1 -or $attr.ID -eq 0xB2 -or $attr.ID -eq 0xB7 -or $attr.ID -eq 0xB8 -or $attr.ID -eq 0xBB -or $attr.ID -eq 0xBC -or $attr.ID -eq 0xC4 -or $attr.ID -eq 0xC5 -or $attr.ID -eq 0xC6 -or $attr.ID -eq 0xE8 -or $attr.ID -eq 0xE9 -or $attr.ID -eq 0xA9)
-            if ($isCriticalAttr) {
-                $isProblematic = $false
-                $isFailed = $false
-
-                if ($attr.ID -eq 0xA9 -or $attr.ID -eq 0xB1 -or $attr.ID -eq 0xE9 -or $attr.ID -eq 0xE8 -or $attr.ID -eq 0xA1) {
-                    $val = if ($attr.ID -eq 0xA9) { $attr.Raw } else { $attr.Current }
-                    if ($val -le 10) { $isFailed = $true }
-                    elseif ($val -le 60) { $isProblematic = $true }
-                } else {
-                    if ($attr.Raw -gt 0) {
-                        if ($attr.Current -le $attr.Threshold -and $attr.Threshold -gt 0) { $isFailed = $true }
-                        else { $isProblematic = $true }
-                    }
+            if ($brand -eq 'SanDisk') {
+                $sanDiskErrorIds = @(0x05, 0xAA, 0xAB, 0xAC, 0xB8, 0xBB, 0xBC, 0xC4, 0xC5, 0xC6)
+                if ($attr.ID -in $sanDiskErrorIds) {
+                    $lineColor = if ($attr.Raw -gt 0) { $Yellow } else { $Green }
+                } elseif ($attr.ID -eq 0xE8) {
+                    if ($attr.Raw -le $attr.Threshold -and $attr.Threshold -gt 0) { $lineColor = $Red }
+                    elseif ($attr.Raw -lt 100) { $lineColor = $Yellow }
+                    else { $lineColor = $Green }
                 }
+            } else {
+                $isCriticalAttr = ($attr.ID -eq 0x01 -or $attr.ID -eq 0x05 -or $attr.ID -eq 0xA0 -or $attr.ID -eq 0xA1 -or $attr.ID -eq 0xB1 -or $attr.ID -eq 0xB2 -or $attr.ID -eq 0xB7 -or $attr.ID -eq 0xB8 -or $attr.ID -eq 0xBB -or $attr.ID -eq 0xBC -or $attr.ID -eq 0xC4 -or $attr.ID -eq 0xC5 -or $attr.ID -eq 0xC6 -or $attr.ID -eq 0xE8 -or $attr.ID -eq 0xE9 -or $attr.ID -eq 0xA9)
+                if ($isCriticalAttr) {
+                    $isProblematic = $false
+                    $isFailed = $false
 
-                if ($isFailed) { $lineColor = $Red }
-                elseif ($isProblematic) { $lineColor = $Yellow }
-                else { $lineColor = $Green }
+                    if ($attr.ID -eq 0xA9 -or $attr.ID -eq 0xB1 -or $attr.ID -eq 0xE9 -or $attr.ID -eq 0xE8 -or $attr.ID -eq 0xA1) {
+                        $val = if ($attr.ID -eq 0xA9) { $attr.Raw } else { $attr.Current }
+                        if ($val -le 10) { $isFailed = $true }
+                        elseif ($val -le 60) { $isProblematic = $true }
+                    } else {
+                        if ($attr.Raw -gt 0) {
+                            if ($attr.Current -le $attr.Threshold -and $attr.Threshold -gt 0) { $isFailed = $true }
+                            else { $isProblematic = $true }
+                        }
+                    }
+
+                    if ($isFailed) { $lineColor = $Red }
+                    elseif ($isProblematic) { $lineColor = $Yellow }
+                    else { $lineColor = $Green }
+                }
             }
             if ($attr.Threshold -gt 0 -and $attr.Current -le $attr.Threshold) {
                 $lineColor = $Red
@@ -2644,8 +2705,16 @@ while ($runLoop) {
         Write-Host "  🔎 Η εκτίμηση ζωής NAND είναι $health%, αλλά υπάρχει ασυνεπής raw NVMe telemetry." -ForegroundColor $Yellow
         Write-Host "  ⚠️ Μην αποφασίσετε αντικατάσταση ή αθώωση του δίσκου μόνο από αυτό το counter. Διατηρήστε backup και εκτελέστε πρόσθετο non-destructive validation." -ForegroundColor $Yellow
     } elseif ($status -eq "CAUTION") {
-        Write-Host "  ⚠️ Ο δίσκος εμφανίζει ενεργά σημάδια φθοράς και media errors. Δεν συνιστάται να παραμείνει ως C: boot drive." -ForegroundColor $Yellow
-        Write-Host "  🚨 ALL CAPS: ΠΡΟΧΩΡΗΣΤΕ ΑΜΕΣΑ ΣΕ BACKUP / CLONE ΚΑΙ ΑΝΤΙΚΑΤΑΣΤΑΣΗ ΤΟΥ ΔΙΣΚΟΥ." -ForegroundColor $Yellow
+        if ($brand -eq 'SanDisk' -and $retiredBlocksOnly -and -not $hasActiveMediaErrors) {
+            Write-Host "  ⚠️ Έχουν αποσυρθεί NAND blocks, όμως η συγκεκριμένη συλλογή δεν αποδεικνύει ότι η φθορά συνεχίζεται τώρα." -ForegroundColor $Yellow
+            Write-Host "  🔸 Κρατήστε backup, εκτελέστε extended SMART self-test και επαναλάβετε τη μέτρηση. Αν τα 05/AA αυξηθούν, εμφανιστούν uncorrectable/program/erase errors ή αποτύχει το self-test, προχωρήστε σε αντικατάσταση." -ForegroundColor $Yellow
+        } elseif ($hasActiveMediaErrors) {
+            Write-Host "  ⚠️ Εντοπίστηκαν ενεργοί δείκτες media/data errors. Απαιτείται άμεσο backup και επιβεβαίωση με extended SMART self-test." -ForegroundColor $Yellow
+            Write-Host "  🔸 Αν το self-test αποτύχει ή οι μετρητές αυξάνονται, αντικαταστήστε τον δίσκο." -ForegroundColor $Yellow
+        } else {
+            Write-Host "  ⚠️ Εντοπίστηκαν SMART warning indicators. Ένα μόνο snapshot δεν αρκεί για να αποδείξει επιδείνωση." -ForegroundColor $Yellow
+            Write-Host "  🔸 Κρατήστε backup, εκτελέστε extended SMART self-test και συγκρίνετε με νέα μέτρηση πριν αποφασίσετε αντικατάσταση." -ForegroundColor $Yellow
+        }
     } else {
         Write-Host "  🚨 Ο δίσκος βρίσκεται σε κρίσιμη κατάσταση αστοχίας." -ForegroundColor $Red
         Write-Host "  🚨 ALL CAPS: ΑΝΤΙΚΑΤΑΣΤΗΣΤΕ ΤΟΝ ΔΙΣΚΟ ΑΜΕΣΑ ΓΙΑ ΑΠΟΦΥΓΗ ΑΠΩΛΕΙΑΣ ΔΕΔΟΜΕΝΩΝ." -ForegroundColor $Red
@@ -2716,7 +2785,7 @@ while ($runLoop) {
     # SanDisk/WD Specific Notes
     if ($brand -eq "SanDisk") {
         $badBlocksA9 = $attributes | Where-Object { $_.ID -eq 0xA9 }
-        $retiredAA = $attributes | Where-Object { $_.ID -eq 0xAA }
+        $grownAA = $attributes | Where-Object { $_.ID -eq 0xAA }
         $reallocated05 = $attributes | Where-Object { $_.ID -eq 0x05 }
         $spareE8 = $attributes | Where-Object { $_.ID -eq 0xE8 }
 
@@ -2725,21 +2794,18 @@ while ($runLoop) {
             Write-Host "  🔸 Total Bad Blocks (A9): " -NoNewline -ForegroundColor $White
             Write-Host "$($badBlocksA9.Raw)" -ForegroundColor $Gray
 
-            $hasGrownBad = ($retiredAA -and $retiredAA.Raw -gt 0) -or ($reallocated05 -and $reallocated05.Raw -gt 0)
+            $hasGrownBad = ($grownAA -and $grownAA.Raw -gt 0) -or ($reallocated05 -and $reallocated05.Raw -gt 0)
             if (-not $hasGrownBad) {
-                Write-Host "     - Τα bad blocks είναι 100% εργοστασιακά (factory bad blocks) και απομονωμένα." -ForegroundColor $Green
-                Write-Host "     - Δεν υπάρχουν grown bad blocks κατά τη χρήση (Reserve Block & Reallocated Sectors = 0)." -ForegroundColor $Green
-                Write-Host "     💡 [Λογική: Αν ανιχνευτούν bad blocks (Total Bad Blocks (A9) > 0), αλλά οι δείκτες grown bad blocks" -ForegroundColor $Gray
-                Write-Host "        (Reserve Block Count (AA) και Reallocated Sectors (05)) είναι μηδενικοί, ο δίσκος είναι υγιής.]" -ForegroundColor $Gray
+                Write-Host "     - Δεν καταγράφονται grown/reassigned blocks (AA/05 = 0). Το A9 μόνο του δεν αποδεικνύει operational degradation." -ForegroundColor $Green
             } else {
-                Write-Host "     - ⚠️ Ο δίσκος έχει αναπτύξει grown bad blocks κατά τη χρήση (retired blocks detected)." -ForegroundColor $Yellow
-                Write-Host "     💡 [Λογική: Αν ανιχνευτούν bad blocks και οι δείκτες grown bad blocks (Reserve Block Count (AA)" -ForegroundColor $Gray
-                Write-Host "        ή Reallocated Sectors (05)) είναι πάνω από 0, ο δίσκος παρουσιάζει ενεργή φθορά.]" -ForegroundColor $Gray
+                Write-Host "     - ⚠️ Έχουν καταγραφεί grown/reassigned NAND blocks κατά τη χρήση (AA/05 > 0)." -ForegroundColor $Yellow
+                Write-Host "     - Αυτό αποδεικνύει ότι έγινε block retirement, όχι ότι ο ρυθμός βλάβης παραμένει ενεργός χωρίς σύγκριση με παλαιότερο baseline." -ForegroundColor $Gray
             }
         }
         if ($spareE8) {
             Write-Host "  🔸 Available Reserved Space (E8): " -NoNewline -ForegroundColor $White
             Write-Host "$($spareE8.Raw)%" -ForegroundColor $(if ($spareE8.Raw -lt 100) { "Yellow" } else { "Gray" })
+            Write-Host "     - Είναι vendor reserve/endurance metric και όχι το proprietary συνολικό Health % του Hard Disk Sentinel." -ForegroundColor $Gray
         }
     }
 

@@ -88,6 +88,66 @@ Assert-Equal $phisonHealth.Percentage 99 'Phison E7 health'
 Assert-Equal (Get-AttributeName 0xE7 $phisonProfile) 'SSD Life Left' 'Phison E7 mapping'
 Assert-Equal (Get-AttributeName 0xF1 $phisonProfile) 'Lifetime Writes (GiB)' 'Phison F1 mapping'
 
+# Live regression: WDC WDS120G2G0A-00JH30 / UE220400 from 192.168.1.221.
+# smartctl 7.5 recognizes this exact WD/SanDisk family. E8 is the available
+# reserved-space percentage; AA is grown bad blocks, while A9 is total bad blocks.
+$wdFixture = @(
+    New-JsonAttributeFixture -Id 0x05 -Raw 6
+    New-JsonAttributeFixture -Id 0xA5 -Raw 918
+    New-JsonAttributeFixture -Id 0xA6 -Raw 7
+    New-JsonAttributeFixture -Id 0xA7 -Raw 15
+    New-JsonAttributeFixture -Id 0xA8 -Raw 17
+    New-JsonAttributeFixture -Id 0xA9 -Raw 83
+    New-JsonAttributeFixture -Id 0xAA -Raw 6
+    New-JsonAttributeFixture -Id 0xAB -Raw 0
+    New-JsonAttributeFixture -Id 0xAC -Raw 0
+    New-JsonAttributeFixture -Id 0xAD -Raw 7
+    New-JsonAttributeFixture -Id 0xE6 -Raw 2465330627134
+    New-JsonAttributeFixture -Id 0xE8 -Raw 95
+    New-JsonAttributeFixture -Id 0xE9 -Raw 856
+    New-JsonAttributeFixture -Id 0xEA -Raw 4994
+    New-JsonAttributeFixture -Id 0xF1 -Raw 1760
+    New-JsonAttributeFixture -Id 0xF2 -Raw 1600
+    New-JsonAttributeFixture -Id 0xF4 -Raw 0
+)
+$wdProfile = Get-AtaTelemetryProfile -Model 'WDC WDS120G2G0A-00JH30' -Firmware 'UE220400' -Attributes $wdFixture
+Assert-Equal $wdProfile 'SanDisk' 'Live WD Green profile classification'
+$parsedWd = @(
+    New-ParsedAttributeFixture -Id 0xE8 -Raw 95
+    New-ParsedAttributeFixture -Id 0xAA -Raw 6
+)
+$wdHealth = Get-AtaHealthEstimate -Profile $wdProfile -Attributes $parsedWd
+Assert-Equal $wdHealth.IsTrusted $true 'WD E8 reserve trust'
+Assert-Equal $wdHealth.Percentage 95 'WD E8 reserve percentage'
+Assert-Equal $wdHealth.MetricLabel 'Reserve' 'WD E8 metric label'
+Assert-Equal (Get-AttributeName 0xA7 $wdProfile) 'Max Bad Blocks per Die' 'WD A7 mapping'
+Assert-Equal (Get-AttributeName 0xA8 $wdProfile) 'Maximum P/E Cycles (TLC)' 'WD A8 mapping'
+Assert-Equal (Get-AttributeName 0xAA $wdProfile) 'Grown Bad Blocks' 'WD AA mapping'
+Assert-Equal (Get-AttributeName 0xE9 $wdProfile) 'NAND GB Written (TLC)' 'WD E9 mapping'
+Assert-Equal (Get-AttributeName 0xF4 $wdProfile) 'Temperature Throttle Status' 'WD F4 mapping'
+
+# A WDC model name alone must not apply SSD-specific WD/SanDisk mappings to HDDs.
+$wdHddProfile = Get-AtaTelemetryProfile -Model 'WDC WD10EZEX-08WN4A0' -Firmware '01.01A01' -Attributes @()
+Assert-Equal $wdHddProfile 'Generic' 'WDC HDD is not classified as SanDisk SSD'
+
+$productionText = Get-Content -LiteralPath $scriptPath -Raw
+foreach ($staleConclusion in @(
+    'ΠΡΟΧΩΡΗΣΤΕ ΑΜΕΣΑ ΣΕ BACKUP / CLONE ΚΑΙ ΑΝΤΙΚΑΤΑΣΤΑΣΗ ΤΟΥ ΔΙΣΚΟΥ.',
+    'Δεν συνιστάται να παραμείνει ως C: boot drive.'
+)) {
+    if ($productionText.Contains($staleConclusion)) {
+        throw "Retired-block CAUTION still contains the stale unconditional replacement conclusion: $staleConclusion"
+    }
+}
+foreach ($requiredConclusion in @(
+    'δεν αποδεικνύει ότι η φθορά συνεχίζεται τώρα',
+    'Αν τα 05/AA αυξηθούν'
+)) {
+    if (-not $productionText.Contains($requiredConclusion)) {
+        throw "Missing evidence-based WD retired-block guidance: $requiredConclusion"
+    }
+}
+
 # A generic B1 must never be silently presented as a trusted health percentage.
 $unknownFixture = @(New-ParsedAttributeFixture -Id 0xB1 -Raw 0 -Current 100)
 $unknownHealth = Get-AtaHealthEstimate -Profile 'Generic' -Attributes $unknownFixture
