@@ -8,6 +8,7 @@
 - Use `REVIEW` when telemetry is internally inconsistent and evidence is insufficient for either a healthy or failed conclusion.
 - USB bridge protocols normally come from `smartctl --scan-open`; do not brute-force controller-specific `-d` values. A controller-specific override is allowed only for an exact, evidence-backed USB VID:PID allowlist entry and must still produce a valid ATA/NVMe health payload.
 - Tool installation is opt-in. A diagnostic read must not silently download or install dependencies.
+- Normal interactive users must be offered required dependency actions inside the script. CLI flags remain automation/agent overrides and must not be the only discoverable user path. `ESC` returns from dependency prompts without installing.
 - Installer-based dependencies belong in their standard `Program Files` location. Never create a new ad-hoc tool directory directly under `C:\`; keep project-specific portable dependencies under versioned `.assets` metadata with non-redistributable binaries ignored.
 - Keep stable smartmontools as the production default. Evaluate an exact, pinned 8.x preview side-by-side only for targeted comparison evidence; never silently replace the stable install or add a nightly build globally to `PATH`.
 - Keep successful WinRM target metadata network-scoped in `WinRMDiscovery`; store credentials through the shared `WinRMConnection` DPAPI profile APIs with `NetworkId` as the scope. Never place passwords in shared history, repo content, or plaintext.
@@ -16,6 +17,14 @@
 - Do not query `Get-StorageReliabilityCounter` for USB storage. Use deterministic physical-drive mapping before slow smartctl identity probes, and retain `-Benchmark` phase evidence for performance regressions.
 
 ## Decision History
+
+### 2026-07-28 — Interactive dependency choice, automation flags second
+
+- **Problem:** When a remote PC lacked `smartctl`, the normal TUI only told the technician to restart DiskHealth with `-InstallSmartctl`.
+- **Root cause:** An automation authorization switch was also treated as the only user-facing installation workflow.
+- **Guardrail:** In normal interactive mode, show an in-script arrow menu with Install, Continue with limited diagnostics, and `ESC` Back. Keep `-InstallSmartctl` as a non-interactive approval override and ensure `-NoUI` never waits for keyboard input. Installation remains explicit opt-in and uses only the official winget package at machine scope.
+- **Files affected:** `DiskHealth.ps1`, `tests\ToolingPolicy.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
+- **Validation:** PowerShell parser passed for both entrypoints; PSScriptAnalyzer reported no errors; all seven regression/integration files passed; executable menu fixtures returned `Install`, `Continue`, and `Back`; live `-NoUI` WinRM smoke on `192.168.1.218` confirmed missing smartctl, emitted the limited-diagnostics warning, performed no install, and completed read-only collection. Canonical discovery live found the target as `WinRMReady`; WinRMConnection/WinRMDiscovery 1.1.0 vendored hashes verified.
 
 ### 2026-07-28 — Shared network-scoped DPAPI profiles
 

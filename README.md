@@ -81,7 +81,7 @@ pwsh -NoProfile -File "DiskHealth.ps1" -ComputerName "localhost"
 # Example 4 — Offline analysis of an exported CrystalDiskInfo report file (SATA or NVMe)
 pwsh -NoProfile -File "DiskHealth.ps1" -FilePath "C:\Reports\CrystalDiskInfo.txt"
 
-# Example 5 — Explicitly allow smartctl installation on a remote target if it is missing
+# Example 5 — Automation override: install smartctl without an interactive question if missing
 pwsh -NoProfile -File "DiskHealth.ps1" -ComputerName "192.168.1.118" -Username "user" -InstallSmartctl
 
 # Example 6 — CLI shortcut directly into LAN discovery
@@ -97,7 +97,7 @@ pwsh -NoProfile -File "DiskHealth.ps1" -ComputerName "192.168.1.118" -Benchmark
 | `-Username` | `string` | `user` | The WinRM username to connect with. |
 | `-Password` | `string` | `""` | The WinRM connection password. |
 | `-FilePath` | `string` | `""` | Optional local path to an exported CrystalDiskInfo txt report. |
-| `-InstallSmartctl` | `switch` | `false` | Explicitly permits an official `winget` machine-scope installation of `smartmontools.smartmontools` into `C:\Program Files\smartmontools` when the remote target is missing smartctl. |
+| `-InstallSmartctl` | `switch` | `false` | Automation override that approves the official `winget` machine-scope installation without showing the interactive question. |
 | `-Discover` | `switch` | `false` | Uses the shared PC-only LAN discovery engine and opens a target selector before WinRM collection. |
 | `-DiscoveryStateRoot` | `string` | `""` | Optional absolute path for network-scoped discovery history/cache. |
 | `-Benchmark` | `switch` | `false` | Writes phase timings to `%LOCALAPPDATA%\DiskHealth\logs\probe_benchmark_*.log`. |
@@ -105,6 +105,8 @@ pwsh -NoProfile -File "DiskHealth.ps1" -ComputerName "192.168.1.118" -Benchmark
 Normal no-argument launch performs **no disk scan first**. It opens an arrow-selectable source menu with `💻 Local computer` and `🌐 Network computer (WinRM)`. The Local disk menu contains disks only. The Network path lists reachable saved PCs from the current network first and includes **Scan network for more PCs** when a full discovery is wanted.
 
 After a successful authenticated session opens, DiskHealth remembers the username in shared connection history and stores the credential locally with Windows DPAPI. On the same network it tries that credential first; only an `AuthenticationRejected` result removes a cached profile and triggers one replacement prompt. TCP, timeout, and transport failures preserve it. The credential can be decrypted only by the same Windows user in the same Windows installation, so copying the profile—or formatting Windows—does not make it portable.
+
+If `smartctl` is missing on an interactive remote target, DiskHealth asks inside the program whether to install the official `smartmontools.smartmontools` winget package or continue with limited WMI/CIM diagnostics. `ESC` returns to the previous menu. `-InstallSmartctl` is retained for automation, while `-NoUI` never waits for keyboard input and continues with an explicit limited-diagnostics warning unless the install flag was supplied.
 
 `ESC` means **Back** in every child menu: local disks return to the main menu, remote disks return immediately to the cached PC selector, and the PC selector returns to the main menu. Only `ESC` on the main menu exits the program. Direct CLI parameters bypass the startup menu and remain available for automation.
 
@@ -123,7 +125,7 @@ No installation required! Just copy the script and run it using PowerShell 7.
 pwsh -NoProfile -File "DiskHealth.ps1"
 ```
 
-`smartctl` is strongly recommended for complete NVMe and ATA telemetry. Install it normally with the official smartmontools installer or `winget install --id smartmontools.smartmontools --exact`. DiskHealth never creates a private fallback under `C:\`; remote installation occurs only when `-InstallSmartctl` is explicitly supplied and fails visibly if `winget` or elevation is unavailable.
+`smartctl` is strongly recommended for complete NVMe and ATA telemetry. Install it normally with the official smartmontools installer or `winget install --id smartmontools.smartmontools --exact`. DiskHealth never creates a private fallback under `C:\`; a normal interactive remote run asks before installing, while `-InstallSmartctl` provides the equivalent non-interactive approval. Installation failures remain visible.
 
 ### Requirements
 

@@ -205,6 +205,71 @@ function Get-MenuDisplayText {
     return $Text.Substring(0, $maximumLength - 3) + '...'
 }
 
+function Show-SmartctlInstallMenu {
+    param(
+        [Parameter(DontShow)]
+        [scriptblock]$ReadKey = { [Console]::ReadKey($true) }
+    )
+
+    $options = @(
+        [PSCustomObject]@{
+            Action = 'Install'
+            Label  = 'Install smartctl now (official winget package)'
+        }
+        [PSCustomObject]@{
+            Action = 'Continue'
+            Label  = 'Continue with limited WMI/CIM diagnostics'
+        }
+    )
+    $selectedIndex = 0
+    $firstRender = $true
+    $menuHeight = $options.Count + 3
+
+    try {
+        try { [Console]::CursorVisible = $false } catch {}
+        while ($true) {
+            if (-not $firstRender) {
+                try {
+                    $position = $Host.UI.RawUI.CursorPosition
+                    $position.Y = [Math]::Max(0, $position.Y - $menuHeight)
+                    $position.X = 0
+                    $Host.UI.RawUI.CursorPosition = $position
+                } catch {}
+            }
+            $firstRender = $false
+
+            Write-Host '### 🔵 Το smartctl δεν βρέθηκε. Επιλέξτε ενέργεια:' -ForegroundColor Cyan
+            for ($index = 0; $index -lt $options.Count; $index++) {
+                $label = Get-MenuDisplayText -Text "[$($index + 1)] $($options[$index].Label)"
+                if ($index -eq $selectedIndex) {
+                    Write-Host '  ➔ [ ' -NoNewline -ForegroundColor Yellow
+                    Write-Host $label -NoNewline -ForegroundColor White
+                    Write-Host ' ]' -ForegroundColor Yellow
+                } else {
+                    Write-Host "     $label" -ForegroundColor Gray
+                }
+            }
+            Write-Host '  ↑/↓ Navigation  Enter Select  1-2 Shortcut' -ForegroundColor DarkGray
+            Write-Host '  ESC Back' -ForegroundColor Red
+
+            $key = & $ReadKey
+            if ($key.Key -eq 'UpArrow') {
+                $selectedIndex = if ($selectedIndex -eq 0) { $options.Count - 1 } else { $selectedIndex - 1 }
+            } elseif ($key.Key -eq 'DownArrow') {
+                $selectedIndex = if ($selectedIndex -eq $options.Count - 1) { 0 } else { $selectedIndex + 1 }
+            } elseif ($key.Key -eq 'Escape') {
+                return 'Back'
+            } elseif ($key.Key -eq 'Enter') {
+                return $options[$selectedIndex].Action
+            } elseif ($key.KeyChar -match '^[1-2]$') {
+                return $options[[int][string]$key.KeyChar - 1].Action
+            }
+        }
+    } finally {
+        try { [Console]::CursorVisible = $true } catch {}
+    }
+}
+
 function Get-DiskHealthWinRMComputers {
     param([string]$StateRoot = '')
 
@@ -1515,7 +1580,8 @@ if ($FilePath) {
                 Write-Host "  🔐 Το credential αποθηκεύτηκε με DPAPI για αυτό το PC και δίκτυο." -ForegroundColor $Green
             }
 
-            # Opt-in εγκατάσταση του smartctl.exe αν λείπει από το remote PC
+            # Detect the dependency first. Interactive users choose in-app;
+            # -InstallSmartctl remains the non-interactive automation override.
             $prerequisiteWatch = [System.Diagnostics.Stopwatch]::StartNew()
             $remoteInfo = Invoke-Command -Session $session -ScriptBlock {
                 $paths = @(
@@ -1541,11 +1607,26 @@ if ($FilePath) {
                 -Details "$($remoteInfo.ComputerName); smartctl=$($remoteInfo.SmartctlExists)"
             $remoteSmartctlExists = [bool]$remoteInfo.SmartctlExists
 
-            if (-not $remoteSmartctlExists -and -not $InstallSmartctl) {
-                Write-Host "⚠️⚠️⚠️ NEED TOOL: Το remote PC δεν διαθέτει smartctl. Δεν έγινε αυτόματη εγκατάσταση." -ForegroundColor $Yellow
-                Write-Host "       Εκτελέστε ξανά με -InstallSmartctl μόνο αφού εγκρίνετε την εγκατάσταση ή εγκαταστήστε το από trusted source." -ForegroundColor $Gray
+            $installSmartctlNow = [bool]$InstallSmartctl
+            if (-not $remoteSmartctlExists -and -not $installSmartctlNow) {
+                $canPromptForInstall = (
+                    -not $NoUI -and
+                    [Environment]::UserInteractive -and
+                    -not [Console]::IsInputRedirected
+                )
+                if ($canPromptForInstall) {
+                    $installChoice = Show-SmartctlInstallMenu
+                    if ($installChoice -eq 'Back') {
+                        return
+                    }
+                    $installSmartctlNow = $installChoice -eq 'Install'
+                } else {
+                    Write-Host "⚠️⚠️⚠️ NEED TOOL: Το remote PC δεν διαθέτει smartctl. Συνεχίζουμε με περιορισμένα WMI/CIM diagnostics." -ForegroundColor $Yellow
+                    Write-Host "       Για automation χρησιμοποιήστε -InstallSmartctl ή εγκαταστήστε το από trusted source." -ForegroundColor $Gray
+                }
             }
-            elseif (-not $remoteSmartctlExists) {
+
+            if (-not $remoteSmartctlExists -and $installSmartctlNow) {
                 Write-Host "  ⚠️ Το remote PC δεν διαθέτει smartctl. Εκκίνηση επίσημης εγκατάστασης μέσω winget..." -ForegroundColor $Yellow
                 $installResult = Invoke-Command -Session $session -ScriptBlock {
                     $winget = Get-Command winget.exe -ErrorAction SilentlyContinue

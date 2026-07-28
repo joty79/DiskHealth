@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.0] - 2026-07-28
+
+### Added
+- Added an in-script arrow-key prompt when a remote target is missing `smartctl`: install the official winget package, continue with limited WMI/CIM diagnostics, or press `ESC` to return.
+
+### Changed
+- Kept `-InstallSmartctl` as the non-interactive automation override instead of requiring normal users to know or re-run the script with a flag.
+- Kept `-NoUI` strictly non-interactive: without the install flag it emits a visible limited-diagnostics warning and never waits for input.
+
+### Tests
+- Extended tooling-policy regression coverage for the interactive choice, `ESC` path, automation override, official package ID, machine scope, and Program Files verification.
+
 ## [1.22.0] - 2026-07-28
 
 ### Changed
