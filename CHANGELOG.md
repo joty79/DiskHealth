@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.5] - 2026-07-28
+
+### Fixed
+- Healthy mechanical disks now display `GOOD (SMART)` with an HDD-specific explanation instead of `GOOD (N/A)` and an irrelevant NAND mapping message.
+- Neutral drive letters and transfer modes no longer use warning yellow.
+- Recognized WD HDD `Spin_Up_Time` values are shown in milliseconds and seconds, so raw `7433` becomes `7433 ms (7.43 s)`.
+- ATA power-on hours now prefer smartctl's decoded value or raw string. Packed Seagate telemetry such as `10733608604013536 / 5088h+41m+39.113s` is correctly reported as `5088 hrs` in both the table and recommendation.
+
+### Tests
+- Extended ATA telemetry fixtures for WD spin-up time, plain hours, and packed Seagate hours.
+- Passed the full local regression suite, PSScriptAnalyzer error review, and final remote-admin WinRM assertions against both 8 TB HDDs on `NEOS / 192.168.1.6`.
+
 ## [1.23.4] - 2026-07-28
 
 ### Fixed

@@ -704,6 +704,41 @@ function Get-AtaTemperatureCelsius {
     return $null
 }
 
+function Get-AtaSpinUpTimeDisplay {
+    param([long]$RawMilliseconds)
+
+    if ($RawMilliseconds -lt 0 -or $RawMilliseconds -gt 600000) {
+        return "$RawMilliseconds"
+    }
+
+    $seconds = [Math]::Round($RawMilliseconds / 1000.0, 2)
+    return "$RawMilliseconds ms ($seconds s)"
+}
+
+function Get-AtaPowerOnHoursValue {
+    param(
+        [Parameter(Mandatory)]$Attribute,
+        [AllowNull()]$SmartData
+    )
+
+    $powerOnProperty = if ($null -ne $SmartData) { $SmartData.PSObject.Properties['power_on_time'] } else { $null }
+    $hoursProperty = if ($null -ne $powerOnProperty -and $null -ne $powerOnProperty.Value) { $powerOnProperty.Value.PSObject.Properties['hours'] } else { $null }
+    if ($null -ne $hoursProperty -and $null -ne $hoursProperty.Value) {
+        return [long]$hoursProperty.Value
+    }
+
+    $rawStringProperty = $Attribute.PSObject.Properties['RawString']
+    if ($null -ne $rawStringProperty -and [string]$rawStringProperty.Value -match '^\s*(\d+)h(?:\+|\s|$)') {
+        return [long]$Matches[1]
+    }
+
+    if ($null -ne $Attribute.Raw -and [long]$Attribute.Raw -ge 0 -and [long]$Attribute.Raw -le 10000000) {
+        return [long]$Attribute.Raw
+    }
+
+    return $null
+}
+
 # Επιλογή ATA telemetry profile από model/firmware και, κυρίως, από το πραγματικό
 # attribute layout. Το brand μόνο του δεν αρκεί: διαφορετικά Patriot/Intenso SSDs
 # χρησιμοποιούν διαφορετικούς controllers και διαφορετική σημασία για τα ίδια IDs.
@@ -2110,6 +2145,11 @@ while ($runLoop) {
         $brand = Get-AtaTelemetryProfile -Model $disk.Model -Firmware $disk.Firmware -Attributes $profileAttributes
     }
 
+    $isRotationalMedia = (-not $isDiskNVMe) -and (
+        $disk.MediaType -match '(?i)HDD|Hard Disk' -or
+        $disk.RotationRate -match '^\s*\d+\s*RPM'
+    )
+
     Write-Host "### 🔵 Στοιχεία Δίσκου (Index: $($disk.Index))" -ForegroundColor $Cyan
     Write-Host "  🔸 Μοντέλο: " -NoNewline -ForegroundColor $White
     Write-Host "$($disk.Model)" -ForegroundColor $Cyan
@@ -2120,7 +2160,7 @@ while ($runLoop) {
     Write-Host "  🔸 Τύπος Μέσου: " -NoNewline -ForegroundColor $White
     Write-Host "$($disk.MediaType) ($($disk.BusType))" -ForegroundColor $Gray
     Write-Host "  🔸 Drive Letter(s): " -NoNewline -ForegroundColor $White
-    Write-Host "$($disk.Letters -join ', ')" -ForegroundColor $Yellow
+    Write-Host "$($disk.Letters -join ', ')" -ForegroundColor $Cyan
     Write-Host "  🔸 Firmware: " -NoNewline -ForegroundColor $White
     Write-Host "$($disk.Firmware)" -ForegroundColor $Gray
     if ($disk.SmartctlJSON) {
@@ -2134,7 +2174,7 @@ while ($runLoop) {
     }
     if ($disk.TransferMode) {
         Write-Host "  🔸 Transfer Mode: " -NoNewline -ForegroundColor $White
-        Write-Host "$($disk.TransferMode)" -ForegroundColor $Yellow
+        Write-Host "$($disk.TransferMode)" -ForegroundColor $Cyan
     }
     if ($disk.RotationRate) {
         Write-Host "  🔸 Rotation Rate: " -NoNewline -ForegroundColor $White
@@ -2553,12 +2593,14 @@ while ($runLoop) {
     Write-Host "  $statusIcon Κατάσταση: " -NoNewline -ForegroundColor $White
     Write-Host "$status " -NoNewline -ForegroundColor $statusColor
     Write-Host "(" -NoNewline -ForegroundColor $White
-    $healthDisplay = if ($null -eq $health) { 'N/A' } elseif ($healthMetricLabel -eq 'Health') { "$health%" } else { "$healthMetricLabel $health%" }
+    $healthDisplay = if ($null -eq $health -and $isRotationalMedia) { 'SMART' } elseif ($null -eq $health) { 'N/A' } elseif ($healthMetricLabel -eq 'Health') { "$health%" } else { "$healthMetricLabel $health%" }
     Write-Host $healthDisplay -NoNewline -ForegroundColor $healthPercentColor
     Write-Host ")" -ForegroundColor $White
 
     if ($status -eq "GOOD") {
-        if ($null -eq $health) {
+        if ($isRotationalMedia) {
+            Write-Host "  🔸 Οι μηχανικοί HDD δεν διαθέτουν τυποποιημένο wear/health percentage. Η αξιολόγηση βασίζεται στο SMART overall status, στα thresholds και στους κρίσιμους raw counters." -ForegroundColor $Gray
+        } elseif ($null -eq $health) {
             Write-Host "  🔸 Το SMART overall status είναι επιτυχές, αλλά δεν υπάρχει αξιόπιστο vendor mapping για ποσοστό ζωής NAND." -ForegroundColor $Gray
         } else {
             Write-Host "  🔸 Ο δίσκος εμφανίζει φυσιολογική φθορά της NAND flash μνήμης (πηγή: $healthSource)." -ForegroundColor $Gray
@@ -2608,9 +2650,16 @@ while ($runLoop) {
         if ($brand -eq "NVMe" -and $attr.ID -eq 0x0E -and $attr.IsTelemetryAnomaly) {
             $rawDisplay = "ANOMALY (low64=$($attr.Low64))".PadRight(17)
         } elseif (($brand -ne "NVMe" -and $attr.ID -eq 0x09) -or ($brand -eq "NVMe" -and $attr.ID -eq 0x0C)) {
-            $rawDisplay = "$($attr.Raw) hrs".PadRight(17)
+            if ($brand -eq 'NVMe') {
+                $rawDisplay = "$($attr.Raw) hrs".PadRight(17)
+            } else {
+                $decodedHours = Get-AtaPowerOnHoursValue -Attribute $attr -SmartData $smart
+                $rawDisplay = if ($null -eq $decodedHours) { "raw=$($attr.Raw)".PadRight(17) } else { "$decodedHours hrs".PadRight(17) }
+            }
         } elseif (($brand -ne "NVMe" -and $attr.ID -eq 0x0C) -or ($brand -eq "NVMe" -and $attr.ID -eq 0x0B)) {
             $rawDisplay = "$($attr.Raw) cycles".PadRight(17)
+        } elseif ($isRotationalMedia -and $disk.Model -match '(?i)^(?:WDC|Western Digital|WD\s)' -and $attr.ID -eq 0x03) {
+            $rawDisplay = (Get-AtaSpinUpTimeDisplay -RawMilliseconds ([long]$attr.Raw)).PadRight(17)
         } elseif ($attr.ID -eq 0xBE -or $attr.ID -eq 0xC2) {
             $temperatureCelsius = Get-AtaTemperatureCelsius -Attribute $attr -SmartData $smart
             $rawDisplay = if ($null -eq $temperatureCelsius) { "raw=$($attr.Raw)".PadRight(17) } else { "$temperatureCelsius C".PadRight(17) }
@@ -2698,9 +2747,13 @@ while ($runLoop) {
     Write-Host "### 🔵 Συμπέρασμα & Ενέργειες" -ForegroundColor $Cyan
     if ($status -eq "GOOD") {
         $phAttr = if ($brand -eq "NVMe") { $attributes | Where-Object {$_.ID -eq 0x0C} } else { $attributes | Where-Object {$_.ID -eq 0x09} }
-        $phVal = if ($phAttr) { $phAttr.Raw } else { 0 }
+        $phVal = if (-not $phAttr) { $null } elseif ($brand -eq 'NVMe') { [long]$phAttr.Raw } else { Get-AtaPowerOnHoursValue -Attribute $phAttr -SmartData $smart }
         Write-Host "  ✅ Δεν ανιχνεύθηκαν ενεργά SMART failure indicators κατά τη συγκεκριμένη συλλογή." -ForegroundColor $Green
-        Write-Host "  💡 Συμβουλή: Λόγω της παλαιότητας και των $phVal ωρών του, η τήρηση backup παραμένει standard τακτική." -ForegroundColor $Gray
+        if ($null -ne $phVal) {
+            Write-Host "  💡 Συμβουλή: Με $phVal ώρες λειτουργίας, η τήρηση τακτικού backup παραμένει standard πρακτική." -ForegroundColor $Gray
+        } else {
+            Write-Host "  💡 Συμβουλή: Η τήρηση τακτικού backup παραμένει standard πρακτική." -ForegroundColor $Gray
+        }
     } elseif ($status -eq "REVIEW") {
         Write-Host "  🔎 Η εκτίμηση ζωής NAND είναι $health%, αλλά υπάρχει ασυνεπής raw NVMe telemetry." -ForegroundColor $Yellow
         Write-Host "  ⚠️ Μην αποφασίσετε αντικατάσταση ή αθώωση του δίσκου μόνο από αυτό το counter. Διατηρήστε backup και εκτελέστε πρόσθετο non-destructive validation." -ForegroundColor $Yellow

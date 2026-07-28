@@ -235,6 +235,8 @@ A separate live `Patriot Burst / SBFM61.3` sample is an officially recognized Ph
 
 If critical degradation values (like reallocated sectors, pending sectors, or uncorrectable read/write events) are above zero, the health status is automatically set to `CAUTION` (or `BAD`), breaking the common firmware illusion of reporting a "Good" status based on remaining writes alone. `CAUTION` does not automatically mean immediate replacement: retired blocks without current program/erase/uncorrectable errors require backup, an extended SMART self-test, and a later comparison against the saved baseline. A failed self-test, increasing counters, threshold crossing, or active data errors justifies escalation.
 
+Mechanical HDDs do not expose a standardized NAND-style wear percentage, so a healthy HDD is labeled `GOOD (SMART)` instead of the misleading `GOOD (N/A)`. Neutral identity and link data use non-warning colors. On recognized WD HDDs, `0x03 Spin Up Time` is rendered in milliseconds and seconds; ATA power-on hours prefer smartctl's decoded top-level value or `raw.string` so packed Seagate counters are never printed as impossible quadrillions of hours.
+
 </details>
 
 <details>

@@ -5,6 +5,7 @@
 - `DiskHealth.ps1` is the canonical entrypoint. A no-argument launch must ask `💻 Local computer` or `🌐 Network computer (WinRM)` before performing any collection; the Local disk menu contains disks only. `ESC` navigates one level back in child menus and exits only from the main menu. `Get-DiskHealth.ps1` is compatibility-only.
 - Preserve raw S.M.A.R.T./NVMe values. Never replace an overflow, parse failure, or implausible counter with zero.
 - Separate remaining-life estimates from overall diagnostic status.
+- HDDs have no standardized SSD-style wear percentage: display `GOOD (SMART)`, explain the evidence model, decode WD spin-up milliseconds and packed ATA power-on hours, and reserve yellow/red exclusively for diagnostic warnings rather than neutral identity/link values.
 - For recognized WD/SanDisk SATA SSDs, label raw `0xE8` as `Reserve n%`; never present it as a proprietary overall-health score. Treat `0xAA` as grown bad blocks, and do not infer ongoing degradation or immediate replacement from a single stable retired-block snapshot.
 - Use `REVIEW` when telemetry is internally inconsistent and evidence is insufficient for either a healthy or failed conclusion.
 - USB bridge protocols normally come from `smartctl --scan-open`; do not brute-force controller-specific `-d` values. A controller-specific override is allowed only for an exact, evidence-backed USB VID:PID allowlist entry and must still produce a valid ATA/NVMe health payload.
@@ -18,6 +19,14 @@
 - Do not query `Get-StorageReliabilityCounter` for USB storage. Use deterministic physical-drive mapping before slow smartctl identity probes, and retain `-Benchmark` phase evidence for performance regressions.
 
 ## Decision History
+
+### 2026-07-28 — HDD presentation and packed ATA time counters
+
+- **Problem:** A healthy `WDC WD80EFPX-68C4ZN0` showed `GOOD (N/A)`, an SSD/NAND mapping explanation, and neutral drive/link values in warning yellow; its `Spin_Up_Time = 7433` had no unit. During the same live scan, a Seagate `ST8000DM004` displayed packed raw `0x09` as more than ten quadrillion power-on hours.
+- **Root cause:** HDD and unknown-SSD presentation shared one fallback, neutral UI emphasis reused the warning color, and ATA time rows printed numeric raw fields without preferring smartctl's decoded `power_on_time.hours` or `raw.string`.
+- **Guardrail:** Render rotational drives as `GOOD (SMART)`, explain that HDD status comes from SMART overall/thresholds/critical counters, keep neutral metadata cyan/gray, format recognized WD spin-up time in milliseconds/seconds, and decode ATA hours before display or recommendations.
+- **Files affected:** `DiskHealth.ps1`, `tests\AtaTelemetry.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
+- **Validation:** Official WD SMART definition review; focused fixtures for WD `7433 ms` and Seagate `5088h+41m+39.113s`; repeated blank-password remote-admin scans of `NEOS / 192.168.1.6` with smartctl 7.5; final live assertions passed for both HDDs.
 
 ### 2026-07-28 — WD/SanDisk reserve percentage and retired-block severity
 
