@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.1] - 2026-07-28
+
+### Fixed
+- Split the previously conflated Patriot/SMI mapping into distinct `SiliconMotionOEM` and `PatriotBurst` telemetry profiles.
+- Corrected the Silicon Motion OEM meanings for attributes `0xA3` through `0xA9`; `0xA9` is now the trusted remaining-lifetime source and `0xB1` is retained as `Total Wear Level Count`, not health percentage.
+- Removed the unsafe generic fallback that treated any normalized `0xB1` as health. Unknown ATA layouts now show `N/A` instead of inventing a percentage.
+
+### Tests
+- Added a regression fixture from the live `SSD 120GB / U0510A0` disk and retained a separate Patriot Burst Elite fixture.
+- Passed the complete local suite and a live saved-credential WinRM run against `192.168.1.218`; the report changed from the incorrect `GOOD (100%)` to `GOOD (91%)` with `0xA9` as its source.
+
 ## [1.23.0] - 2026-07-28
 
 ### Added

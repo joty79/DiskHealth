@@ -107,3 +107,11 @@
 - **Guardrail:** Assign `foreach` output to an array first (or wrap the whole expression in `@(...)`) before piping it in inline remote commands.
 - **Files affected:** `PROJECT_RULES.md`.
 - **Validation:** Corrected smoke mapped native NVMe Disk 2 uniquely to `/dev/sdc -d nvme`; duplicate ATA scan paths were detected rather than guessed.
+
+### 2026-07-28 — Generic ATA B1 is not a health percentage
+
+- **Problem:** After smartmontools installation, a live `SSD 120GB / U0510A0` target displayed `GOOD (100%)` from normalized `0xB1`, even though its raw `0xA9` remaining-life value was `91` and multiple Silicon Motion attributes had incorrect labels.
+- **Root cause:** Brand and controller profile were conflated. Every unrecognized ATA SSD fell through to a generic `0xB1` health rule, while two distinct Patriot/SMI layouts shared one attribute map.
+- **Guardrail:** Resolve ATA telemetry from the complete attribute layout, not brand text or one ID. Keep `SiliconMotionOEM` and `PatriotBurst` profiles separate; for the OEM layout use raw `0xA9` as remaining life and treat `0xB1` only as total wear count. Never turn an unknown generic `0xB1` into a health percentage; show `N/A` when no trusted mapping exists.
+- **Files affected:** `DiskHealth.ps1`, `tests\AtaHealthProfile.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
+- **Validation:** Official smartmontools master database review; raw smartctl 7.5 collection through the canonical WinRMConnection 1.1.0 module; full local regression suite; live end-to-end run against `192.168.1.218` asserted `GOOD (91%)`, `0xA9` source, corrected SMI labels, and absence of stale `GOOD (100%)`.

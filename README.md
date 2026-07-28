@@ -36,7 +36,7 @@
 
 A native PowerShell script that connects locally or remotely via WinRM, queries `root\wmi` storage classes, and parses S.M.A.R.T. data natively.
 
-For SATA/IDE drives, it queries S.M.A.R.T. byte arrays and maps vendor-specific IDs (Samsung vs Patriot/SMI vs Generic). For NVMe drives, it automatically checks if **smartctl** is installed (with JSON output support) to get full S.M.A.R.T. telemetry, falling back to CIM Storage Reliability Counters (`MSFT_StorageReliabilityCounter`) if smartctl is absent.
+For SATA/IDE drives, it queries S.M.A.R.T. byte arrays and resolves controller-specific layouts instead of trusting brand names alone. Samsung, Silicon Motion OEM, Patriot Burst, and SanDisk/WD profiles remain separate because the same attribute ID can mean different things on different controllers. For NVMe drives, it automatically checks if **smartctl** is installed (with JSON output support) to get full S.M.A.R.T. telemetry, falling back to CIM Storage Reliability Counters (`MSFT_StorageReliabilityCounter`) if smartctl is absent.
 
 For NVMe drives connected through USB/UASP enclosures, DiskHealth maps `/dev/sd*` back to the corresponding Windows `PhysicalDrive` index, so an enclosure that rewrites the visible model or serial cannot prevent the underlying NVMe telemetry from being selected. It prefers bridge types returned by `smartctl --scan-open`; an exact USB VID:PID allowlist is used only for live-verified controllers that scan as generic SCSI wrappers, currently `152D:0581` with `sntjmicron`.
 
@@ -226,7 +226,9 @@ It converts raw hexadecimal values automatically:
 <details>
 <summary><b>How is the Health Status determined?</b></summary>
 
-For SSDs, the health % is derived from the **Wear Leveling Count (0xB1)** or **Media Wearout Indicator (0xE9)** for Samsung/Generic drives, the **Remain Life (0xA9)** raw value for Patriot/SMI controllers, or the **Percentage Used (0x05)** for NVMe drives.
+For Samsung SSDs, the health % can use the normalized **Wear Leveling Count (0xB1)**. Confirmed Silicon Motion OEM and Patriot Burst layouts use the raw **Remaining Lifetime Percentage (0xA9)**, while NVMe uses **Percentage Used (0x05)**. A generic ATA `0xB1` is not trusted automatically: if the controller layout is unknown, DiskHealth reports `N/A` for the percentage while keeping the independent SMART overall status and failure indicators visible.
+
+The distinction matters for OEM drives with generic names. A live `SSD 120GB / U0510A0` sample was absent from the smartctl drive database but exposed the complete Silicon Motion OEM signature: `0xA9 = 91` was remaining life, whereas `0xB1` was a separate total-wear counter whose normalized value happened to be `100`.
 
 If critical degradation values (like reallocated sectors, pending sectors, or uncorrectable read/write events) are above zero, the health status is automatically set to `CAUTION` (or `BAD`), breaking the common firmware illusion of reporting a "Good" status based on remaining writes alone.
 

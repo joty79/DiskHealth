@@ -704,7 +704,97 @@ function Get-AtaTemperatureCelsius {
     return $null
 }
 
-# Λογική επίλυσης ονομάτων attributes ανάλογα με τη μάρκα/controller
+# Επιλογή ATA telemetry profile από model/firmware και, κυρίως, από το πραγματικό
+# attribute layout. Το brand μόνο του δεν αρκεί: διαφορετικά Patriot/Intenso SSDs
+# χρησιμοποιούν διαφορετικούς controllers και διαφορετική σημασία για τα ίδια IDs.
+function Get-AtaTelemetryProfile {
+    param(
+        [AllowEmptyString()][string]$Model = '',
+        [AllowEmptyString()][string]$Firmware = '',
+        [AllowNull()][object[]]$Attributes
+    )
+
+    if ($Model -match '(?i)SAMSUNG') { return 'Samsung' }
+    if ($Model -match '(?i)SanDisk|Western Digital|\bWDC\b|\bWD\s') { return 'SanDisk' }
+
+    $ids = @{}
+    $a9Raw = $null
+    foreach ($attribute in @($Attributes)) {
+        if ($null -eq $attribute) { continue }
+
+        $idProperty = if ($attribute.PSObject.Properties['id']) { $attribute.PSObject.Properties['id'] } elseif ($attribute.PSObject.Properties['ID']) { $attribute.PSObject.Properties['ID'] } else { $null }
+        if ($null -eq $idProperty) { continue }
+
+        $id = [int]$idProperty.Value
+        $ids[$id] = $true
+        if ($id -eq 0xA9) {
+            if ($attribute.PSObject.Properties['raw'] -and $null -ne $attribute.raw) {
+                if ($attribute.raw.PSObject.Properties['value']) { $a9Raw = [long]$attribute.raw.value }
+                else { $a9Raw = [long]$attribute.raw }
+            } elseif ($attribute.PSObject.Properties['Raw']) {
+                $a9Raw = [long]$attribute.Raw
+            } elseif ($attribute.PSObject.Properties['RawVal']) {
+                $a9Raw = [long]$attribute.RawVal
+            }
+        }
+    }
+
+    $hasPlausibleA9Lifetime = ($null -ne $a9Raw -and $a9Raw -ge 0 -and $a9Raw -le 100)
+    $smiOemIds = @(0xA0, 0xA1, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xB1, 0xB2)
+    $smiOemMatches = @($smiOemIds | Where-Object { $ids.ContainsKey($_) }).Count
+    $patriotBurstIds = @(0xA1, 0xA2, 0xA3, 0xA4, 0xA6, 0xA7, 0xA8, 0xA9, 0xAB, 0xAC, 0xAE, 0xCE, 0xCF)
+    $patriotBurstMatches = @($patriotBurstIds | Where-Object { $ids.ContainsKey($_) }).Count
+
+    if ($hasPlausibleA9Lifetime -and $patriotBurstMatches -ge 10 -and $ids.ContainsKey(0xAB) -and $ids.ContainsKey(0xAC)) {
+        return 'PatriotBurst'
+    }
+    if ($hasPlausibleA9Lifetime -and $smiOemMatches -ge 9 -and $ids.ContainsKey(0xA0) -and $ids.ContainsKey(0xB2)) {
+        return 'SiliconMotionOEM'
+    }
+
+    # Known model hints are accepted only together with a plausible A9 lifetime.
+    if ($hasPlausibleA9Lifetime -and $Model -match '(?i)P210|Silicon Motion') {
+        return 'SiliconMotionOEM'
+    }
+    if ($hasPlausibleA9Lifetime -and $Model -match '(?i)Patriot.*Burst') {
+        return 'PatriotBurst'
+    }
+
+    return 'Generic'
+}
+
+function Get-AtaHealthEstimate {
+    param(
+        [Parameter(Mandatory)][string]$Profile,
+        [Parameter(Mandatory)][object[]]$Attributes
+    )
+
+    $result = [ordered]@{
+        Percentage = $null
+        Source = 'No trusted vendor wear attribute'
+        IsTrusted = $false
+    }
+
+    if ($Profile -eq 'Samsung') {
+        $wear = $Attributes | Where-Object { $_.ID -eq 0xB1 } | Select-Object -First 1
+        if ($wear -and $null -ne $wear.Current -and [int]$wear.Current -ge 0 -and [int]$wear.Current -le 100) {
+            $result.Percentage = [int]$wear.Current
+            $result.Source = 'Wear Leveling Count (0xB1 normalized)'
+            $result.IsTrusted = $true
+        }
+    } elseif ($Profile -in @('SiliconMotionOEM', 'PatriotBurst')) {
+        $wear = $Attributes | Where-Object { $_.ID -eq 0xA9 } | Select-Object -First 1
+        if ($wear -and $null -ne $wear.Raw -and [long]$wear.Raw -ge 0 -and [long]$wear.Raw -le 100) {
+            $result.Percentage = [int]$wear.Raw
+            $result.Source = 'Remaining Lifetime Percentage (0xA9 raw)'
+            $result.IsTrusted = $true
+        }
+    }
+
+    return [PSCustomObject]$result
+}
+
+# Λογική επίλυσης ονομάτων attributes ανάλογα με το επιβεβαιωμένο controller profile
 function Get-AttributeName {
     param(
         [int]$id,
@@ -727,36 +817,49 @@ function Get-AttributeName {
             0xEE { return "Manufacturer Specific (EE)" }
         }
     }
-    elseif ($brand -eq "Patriot") {
+    elseif ($brand -eq 'SiliconMotionOEM') {
         switch ($id) {
-            0xA0 { return "Uncorrectable Sectors Read/Write" }
-            0xA1 { return "Number of Valid Spare Blocks" }
+            0xA0 { return "Uncorrectable Error Count" }
+            0xA1 { return "Valid Spare Block Count" }
+            0xA3 { return "Initial Bad Block Count" }
+            0xA4 { return "Total Erase Count" }
+            0xA5 { return "Maximum Erase Count" }
+            0xA6 { return "Minimum Erase Count" }
+            0xA7 { return "Average Erase Count" }
+            0xA8 { return "Maximum Erase Count of Spec" }
+            0xA9 { return "Remaining Lifetime Percentage" }
+            0xAF { return "Program Fail Count (Worst Die)" }
+            0xB0 { return "Erase Fail Count (Worst Die)" }
+            0xB1 { return "Total Wear Level Count" }
+            0xB2 { return "Runtime Invalid Block Count" }
+            0xF1 { return "Host Writes (32 MiB)" }
+            0xF2 { return "Host Reads (32 MiB)" }
+            0xF5 { return "TLC Writes (32 MiB)" }
+        }
+    }
+    elseif ($brand -eq 'PatriotBurst') {
+        switch ($id) {
+            0xA1 { return "GDN" }
             0xA2 { return "Total Erase Count" }
             0xA3 { return "Max PE Cycle" }
             0xA4 { return "Average Erase Count" }
-            0xA5 { return "Maximum Erase Count" }
             0xA6 { return "Total Bad Block Count" }
             0xA7 { return "SSD Protect Mode" }
-            0xA8 { return "SATA Phy Error Count" }
-            0xA9 { return "Remain Life" }
+            0xA8 { return "SATA PHY Error Count" }
+            0xA9 { return "Health / Remaining Lifetime" }
             0xAB { return "Program Fail Count" }
             0xAC { return "Erase Fail Count" }
             0xAE { return "Unexpected Power Loss Count" }
             0xAF { return "ECC Fail Count" }
-            0xB2 { return "Runtime Invalid Block Count" }
             0xBB { return "Reported Uncorrectable Errors" }
             0xC2 { return "Enclosure Temperature" }
             0xC3 { return "Cumulative Corrected ECC" }
-            0xC4 { return "Reallocation Event Count" }
-            0xC7 { return "Ultra DMA CRC Error Count" }
-            0xCE { return "Min. Erase Count" }
-            0xCF { return "Max Erase Count" }
+            0xCE { return "Minimum Erase Count" }
+            0xCF { return "Maximum Erase Count" }
             0xE8 { return "Available Reserved Space" }
             0xF1 { return "Write Life Time" }
             0xF2 { return "Read Life Time" }
-            0xF5 { return "Flash Write Sector Count (NAND)" }
             0xF9 { return "Total GB Written to NAND (TLC)" }
-            0xFA { return "Total GB Written to NAND (SLC)" }
         }
     }
     elseif ($brand -eq "SanDisk") {
@@ -1886,12 +1989,8 @@ while ($runLoop) {
     $brand = "Generic"
     if ($isDiskNVMe) {
         $brand = "NVMe"
-    } elseif ($disk.Model -like "*SAMSUNG*") {
-        $brand = "Samsung"
-    } elseif ($disk.Model -like "*Patriot*" -or $disk.Model -like "*P210*" -or $disk.Model -like "*Silicon*" -or $disk.Model -like "*Intenso*") {
-        $brand = "Patriot"
-    } elseif ($disk.Model -like "*SanDisk*" -or $disk.Model -like "*WD*" -or $disk.Model -like "*Western*" -or $disk.Model -like "*WDC*") {
-        $brand = "SanDisk"
+    } else {
+        $brand = Get-AtaTelemetryProfile -Model $disk.Model -Firmware $disk.Firmware -Attributes @()
     }
 
     # PARSE SMARTCTL JSON DATA IF AVAILABLE
@@ -1925,6 +2024,17 @@ while ($runLoop) {
                 $disk.TransferMode = "$cSpeed | $mSpeed"
             }
         }
+    }
+
+    if (-not $isDiskNVMe) {
+        $profileAttributes = if ($smart -and $smart.ata_smart_attributes.table) {
+            @($smart.ata_smart_attributes.table)
+        } elseif ($disk.ImportedFromFile -and $disk.ParsedAttributes) {
+            @($disk.ParsedAttributes)
+        } else {
+            @()
+        }
+        $brand = Get-AtaTelemetryProfile -Model $disk.Model -Firmware $disk.Firmware -Attributes $profileAttributes
     }
 
     Write-Host "### 🔵 Στοιχεία Δίσκου (Index: $($disk.Index))" -ForegroundColor $Cyan
@@ -2198,29 +2308,23 @@ while ($runLoop) {
     }
 
     # 5. Υπολογισμός Υγείας (Health Calculation)
-    $health = 100
-    $healthSource = "Default"
+    $health = $null
+    $healthSource = "No trusted vendor wear attribute"
 
     $wearB1 = $attributes | Where-Object { $_.ID -eq 0xB1 }
     $wearE9 = $attributes | Where-Object { $_.ID -eq 0xE9 }
     $wearA9 = $attributes | Where-Object { $_.ID -eq 0xA9 }
     $wear05 = $attributes | Where-Object { $_.ID -eq 0x05 }
 
-    if ($brand -eq "Samsung" -and $wearB1) {
-        $health = $wearB1.Current
-        $healthSource = "Wear Leveling Count (0xB1)"
-    } elseif ($brand -eq "Patriot" -and $wearA9) {
-        $health = $wearA9.Raw
-        $healthSource = "Remain Life (0xA9) Raw Value"
-    } elseif ($brand -eq "NVMe" -and $wear05) {
+    if ($brand -eq "NVMe" -and $wear05) {
         $health = 100 - $wear05.Raw
         $healthSource = "Percentage Used (0x05)"
-    } elseif ($wearE9) {
-        $health = $wearE9.Current
-        $healthSource = "Media Wearout Indicator (0xE9)"
-    } elseif ($wearB1) {
-        $health = $wearB1.Current
-        $healthSource = "Wear Leveling Count (0xB1)"
+    } elseif ($brand -ne 'NVMe') {
+        $ataHealth = Get-AtaHealthEstimate -Profile $brand -Attributes $attributes
+        if ($ataHealth.IsTrusted) {
+            $health = $ataHealth.Percentage
+            $healthSource = $ataHealth.Source
+        }
     }
 
     # Έλεγχος Κρίσιμων Σφαλμάτων (SATA & NVMe)
@@ -2249,7 +2353,7 @@ while ($runLoop) {
             $statusIcon = "⚠️"
             $cautionReasons += "Reallocated Sectors ($($reallocated.Raw))"
         }
-        if ($brand -eq "Patriot" -and $uncorrectableA0 -and $uncorrectableA0.Raw -gt 0) {
+        if ($brand -eq "SiliconMotionOEM" -and $uncorrectableA0 -and $uncorrectableA0.Raw -gt 0) {
             $status = "CAUTION"
             $statusColor = $Yellow
             $statusIcon = "⚠️"
@@ -2336,7 +2440,7 @@ while ($runLoop) {
     $healthPercentColor = $Green
     if ($status -ne "GOOD") {
         $healthPercentColor = $statusColor
-    } elseif ($health -le 60) {
+    } elseif ($null -ne $health -and $health -le 60) {
         $healthPercentColor = $Yellow
     }
 
@@ -2344,11 +2448,16 @@ while ($runLoop) {
     Write-Host "  $statusIcon Κατάσταση: " -NoNewline -ForegroundColor $White
     Write-Host "$status " -NoNewline -ForegroundColor $statusColor
     Write-Host "(" -NoNewline -ForegroundColor $White
-    Write-Host "$health%" -NoNewline -ForegroundColor $healthPercentColor
+    $healthDisplay = if ($null -eq $health) { 'N/A' } else { "$health%" }
+    Write-Host $healthDisplay -NoNewline -ForegroundColor $healthPercentColor
     Write-Host ")" -ForegroundColor $White
 
     if ($status -eq "GOOD") {
-        Write-Host "  🔸 Ο δίσκος εμφανίζει φυσιολογική φθορά της NAND flash μνήμης (πηγή: $healthSource)." -ForegroundColor $Gray
+        if ($null -eq $health) {
+            Write-Host "  🔸 Το SMART overall status είναι επιτυχές, αλλά δεν υπάρχει αξιόπιστο vendor mapping για ποσοστό ζωής NAND." -ForegroundColor $Gray
+        } else {
+            Write-Host "  🔸 Ο δίσκος εμφανίζει φυσιολογική φθορά της NAND flash μνήμης (πηγή: $healthSource)." -ForegroundColor $Gray
+        }
         Write-Host "  🔸 Δεν ανιχνεύθηκαν ενεργά SMART failure indicators κατά τη συγκεκριμένη συλλογή." -ForegroundColor $Gray
     } elseif ($status -eq "REVIEW") {
         Write-Host "  🔎 ΑΠΑΙΤΕΙ ΕΛΕΓΧΟ: Εντοπίστηκε ασυνεπής NVMe telemetry που δεν πρέπει να μετατραπεί ούτε σε 0 ούτε σε αυτόματη αστοχία:" -ForegroundColor $Yellow
@@ -2502,18 +2611,19 @@ while ($runLoop) {
         }
     }
 
-    # Patriot Specific Notes
-    if ($brand -eq "Patriot") {
+    # Silicon Motion / Patriot controller-specific notes
+    if ($brand -in @('SiliconMotionOEM', 'PatriotBurst')) {
         $wearA9 = $attributes | Where-Object { $_.ID -eq 0xA9 }
         $hostWritesF1 = $attributes | Where-Object { $_.ID -eq 0xF1 }
         $nandWritesF5 = $attributes | Where-Object { $_.ID -eq 0xF5 }
 
-        Write-Host "`n  🔵 Ειδική Παρατήρηση Patriot SSD (Silicon Motion):" -ForegroundColor $Cyan
+        $profileLabel = if ($brand -eq 'SiliconMotionOEM') { 'Silicon Motion OEM' } else { 'Patriot Burst' }
+        Write-Host "`n  🔵 Ειδική Παρατήρηση $profileLabel profile:" -ForegroundColor $Cyan
         if ($wearA9) {
             Write-Host "  🔸 Η υπολειπόμενη ζωή (Remain Life) είναι " -NoNewline -ForegroundColor $White
             Write-Host "$($wearA9.Raw)%" -ForegroundColor $Yellow
         }
-        if ($hostWritesF1 -and $nandWritesF5) {
+        if ($brand -eq 'SiliconMotionOEM' -and $hostWritesF1 -and $nandWritesF5) {
             $hostGB = [Math]::Round(($hostWritesF1.Raw * 32) / 1024, 2)
             $nandGB = [Math]::Round(($nandWritesF5.Raw * 32) / 1024, 2)
             $waf = if ($hostGB -gt 0) { [Math]::Round($nandGB / $hostGB, 2) } else { 0 }
