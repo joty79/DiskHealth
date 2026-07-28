@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.2] - 2026-07-29
+
+### Changed
+- Μεταφέρθηκαν τα generic column-shrink, vertical-cell-wrap, border/row και horizontal-pan mechanics στο pinned canonical `PS_UI_Blueprint.psm1`. Το DiskHealth κρατά μόνο το SMART schema, τις header abbreviations και το coloring ως thin downstream adapter.
+- Κάτω από το ελάχιστο αναγνώσιμο table width, ο πίνακας δεν αλλάζει πλέον σε stacked cards. Παραμένει σταθερός σε logical width και μετακινείται με `←/→`, ενώ εμφανίζεται width-safe `table pan` indicator με current/maximum column offset.
+- Το prose παραμένει ανεξάρτητο από το table viewport και συνεχίζει να τυλίγεται κατακόρυφα στο πραγματικό terminal width.
+
+### Tests
+- Προστέθηκαν pure assertions για horizontal slice/range, left/right report viewport και indicator visibility, μαζί με νέο `50`-column σημείο στο sequential virtual-terminal replay.
+- Το shared blueprint καλύπτει πλέον preferred/minimum/impossible column budgets και fixed-width vertical row wrapping σε PowerShell 7 και Windows PowerShell 5.1.
+
 ## [1.24.1] - 2026-07-29
 
 ### Fixed

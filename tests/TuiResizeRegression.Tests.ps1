@@ -95,30 +95,40 @@ foreach ($line in $mediumLines) {
     Assert-TuiRegression ($line.PlainText.Length -le 56) "Adaptive table line exceeds 56 columns: $($line.PlainText)"
 }
 
-$compactLines = @(Get-DiskHealthReportDisplayLines -Rows @($reportRows) -Width 48)
-Assert-TuiRegression (@($compactLines.PlainText | Where-Object { $_ -like 'SMART attributes (compact view):*' }).Count -gt 0) 'Compact report did not switch away from the fixed-width SMART table.'
-Assert-TuiRegression (-not (@($compactLines.PlainText | Where-Object { $_.TrimStart().StartsWith('|') }).Count)) 'Compact report retained a fixed-width table row.'
-foreach ($line in $compactLines) {
-    Assert-TuiRegression ($line.PlainText.Length -le 48) "Compact report line exceeds 48 columns: $($line.PlainText)"
+$pannedLeftLines = @(Get-DiskHealthReportDisplayLines -Rows @($reportRows) -Width 48 -HorizontalOffset 0)
+$pannedRightLines = @(Get-DiskHealthReportDisplayLines -Rows @($reportRows) -Width 48 -HorizontalOffset 8)
+Assert-TuiRegression (-not (@($pannedLeftLines.PlainText | Where-Object { $_ -like 'SMART attributes (compact view):*' }).Count)) 'Narrow report unexpectedly switched to the old stacked table view.'
+Assert-TuiRegression (@($pannedLeftLines.PlainText | Where-Object { $_.TrimStart().StartsWith('| ID') }).Count -eq 1) 'The left edge of the horizontally panned table lost its header.'
+Assert-TuiRegression (@($pannedLeftLines.HorizontalMaximum | Where-Object { $_ -gt 0 }).Count -gt 0) 'Narrow report did not expose a horizontal table range.'
+Assert-TuiRegression (($pannedLeftLines.PlainText -join "`n") -ne ($pannedRightLines.PlainText -join "`n")) 'Changing the horizontal offset did not move the table viewport.'
+foreach ($line in $pannedLeftLines + $pannedRightLines) {
+    Assert-TuiRegression ($line.PlainText.Length -le 48) "Panned report line exceeds 48 columns: $($line.PlainText)"
 }
 
-$widthSequence = @(120, 101, 100, 99, 98, 80, 60, 120)
+$widthSequence = @(120, 101, 100, 99, 98, 80, 60, 50, 120)
 $terminalHeight = 44
 $frames = [System.Collections.Generic.List[object]]::new()
 for ($index = 0; $index -lt $widthSequence.Count; $index++) {
     $terminalWidth = $widthSequence[$index]
     $state = $index + 1
+    $horizontalOffset = if ($terminalWidth -eq 50) { 4 } else { 0 }
     $view = New-DiskHealthReportFrame `
         -Rows @($reportRows) `
         -Width ($terminalWidth - 2) `
         -WindowHeight $terminalHeight `
         -ScrollOffset ($state * 3) `
+        -HorizontalOffset $horizontalOffset `
         -Target "state-$state"
     $payload = Get-DiskHealthReportFramePayload -Frame $view.Frame -ForceClear
     $lineCount = [regex]::Matches($view.Frame.ToString(), "`n").Count
     Assert-TuiRegression ($lineCount -le ($terminalHeight - 1)) "Frame $state uses $lineCount rows in a $terminalHeight-row viewport."
     Assert-TuiRegression ($payload.Contains("`r`n")) "Frame $state lost raw CRLF line endings."
     Assert-TuiRegression (-not [regex]::IsMatch($payload, '(?<!\r)\n')) "Frame $state contains a lone LF."
+    if ($terminalWidth -eq 50) {
+        Assert-TuiRegression ($view.MaximumHorizontalOffset -gt 0) 'The 50-column frame did not expose horizontal table navigation.'
+        Assert-TuiRegression ($view.HorizontalOffset -eq 4) 'The 50-column frame did not preserve the requested horizontal offset.'
+        Assert-TuiRegression ($view.Frame.ToString().Contains('table pan')) 'The narrow report frame did not render the horizontal pan indicator.'
+    }
     $frames.Add([pscustomobject]@{ Width = $terminalWidth; Height = $terminalHeight; State = $state; Data = $payload })
 }
 
@@ -229,7 +239,7 @@ for item in manifest:
         raise SystemExit(f"state {item['state']}: stale prior frame remained")
     previous_marker = marker
 
-print("DiskHealth pyte resize replay passed: 120->101->100->99->98->80->60->120, zero wraps, zero scrolls, zero stale frames")
+print("DiskHealth pyte resize replay passed: 120->101->100->99->98->80->60->50->120, zero wraps, zero scrolls, zero stale frames")
 '@
         $pythonScript = Join-Path $tempRoot 'replay.py'
         [System.IO.File]::WriteAllText($pythonScript, $pythonCode, [System.Text.UTF8Encoding]::new($false))

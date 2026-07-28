@@ -353,6 +353,174 @@ function Add-UiFrameShortcutSegments {
     Add-UiFrameLine -Frame $Frame -Text "$($line.ToString())$($_C.EraseLn)"
 }
 
+function Get-UiAdaptiveColumnWidths {
+    <#
+    .SYNOPSIS
+        Shrinks preferred table widths through an explicit, reusable plan.
+
+    .DESCRIPTION
+        The caller owns the table schema and supplies ordered shrink stages such
+        as @{ Index = 1; Minimum = 16 }. An empty result means the requested
+        content budget cannot preserve the table's declared minimum layout.
+    #>
+    param(
+        [Parameter(Mandatory)][int[]]$PreferredWidths,
+        [Parameter(Mandatory)][object[]]$ShrinkPlan,
+        [int]$ContentWidth
+    )
+
+    if ($PreferredWidths.Count -eq 0 -or $ContentWidth -lt $PreferredWidths.Count) { return @() }
+
+    $widths = [int[]]@($PreferredWidths | ForEach-Object { [Math]::Max(1, [int]$_) })
+    $deficit = [Math]::Max(0, [int](($widths | Measure-Object -Sum).Sum) - $ContentWidth)
+    foreach ($stage in $ShrinkPlan) {
+        if ($deficit -le 0) { break }
+        $index = [int]$stage.Index
+        if ($index -lt 0 -or $index -ge $widths.Count) { continue }
+
+        $minimum = [Math]::Max(1, [int]$stage.Minimum)
+        $available = [Math]::Max(0, $widths[$index] - $minimum)
+        $reduction = [Math]::Min($deficit, $available)
+        $widths[$index] -= $reduction
+        $deficit -= $reduction
+    }
+
+    if ($deficit -gt 0) { return @() }
+    return @($widths)
+}
+
+function Split-UiTableCellText {
+    param(
+        [AllowEmptyString()][string]$Text = '',
+        [int]$Width
+    )
+
+    $Width = [Math]::Max(1, $Width)
+    if ([string]::IsNullOrEmpty($Text)) { return @('') }
+    if ($Text.Length -le $Width) { return @($Text) }
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $line = ''
+    foreach ($originalWord in @($Text.Trim() -split '\s+')) {
+        $word = $originalWord
+        while ($word.Length -gt $Width) {
+            if ($line.Length -gt 0) {
+                $lines.Add($line)
+                $line = ''
+            }
+            $lines.Add($word.Substring(0, $Width))
+            $word = $word.Substring($Width)
+        }
+
+        $separator = if ($line.Length -gt 0) { ' ' } else { '' }
+        if (($line.Length + $separator.Length + $word.Length) -gt $Width) {
+            if ($line.Length -gt 0) { $lines.Add($line) }
+            $line = $word
+        }
+        else {
+            $line += $separator + $word
+        }
+    }
+
+    if ($line.Length -gt 0) { $lines.Add($line) }
+    return @($lines)
+}
+
+function New-UiAdaptiveTableBorder {
+    param(
+        [Parameter(Mandatory)][int[]]$Widths,
+        [AllowEmptyString()][string]$Indent = ''
+    )
+
+    $border = [System.Text.StringBuilder]::new($Indent + '+')
+    foreach ($cellWidth in $Widths) {
+        $null = $border.Append(('-' * ([Math]::Max(1, $cellWidth) + 2)) + '+')
+    }
+    return $border.ToString()
+}
+
+function ConvertTo-UiAdaptiveTableRowLines {
+    param(
+        [Parameter(Mandatory)][string[]]$Cells,
+        [Parameter(Mandatory)][int[]]$Widths,
+        [int[]]$RightAlignedColumns = @(),
+        [AllowEmptyString()][string]$Indent = ''
+    )
+
+    if ($Cells.Count -ne $Widths.Count) {
+        throw 'Cells and Widths must contain the same number of items.'
+    }
+
+    $wrappedCells = [System.Collections.Generic.List[object]]::new()
+    $rowHeight = 1
+    for ($cellIndex = 0; $cellIndex -lt $Cells.Count; $cellIndex++) {
+        $wrapped = @(Split-UiTableCellText -Text $Cells[$cellIndex] -Width $Widths[$cellIndex])
+        $wrappedCells.Add($wrapped)
+        $rowHeight = [Math]::Max($rowHeight, $wrapped.Count)
+    }
+
+    $result = [System.Collections.Generic.List[string]]::new()
+    for ($lineIndex = 0; $lineIndex -lt $rowHeight; $lineIndex++) {
+        $line = [System.Text.StringBuilder]::new($Indent)
+        for ($cellIndex = 0; $cellIndex -lt $Cells.Count; $cellIndex++) {
+            $value = if ($lineIndex -lt $wrappedCells[$cellIndex].Count) { [string]$wrappedCells[$cellIndex][$lineIndex] } else { '' }
+            $alignRight = $RightAlignedColumns -contains $cellIndex
+            $padded = if ($alignRight) { $value.PadLeft($Widths[$cellIndex]) } else { $value.PadRight($Widths[$cellIndex]) }
+            $null = $line.Append('| ' + $padded + ' ')
+        }
+        $null = $line.Append('|')
+        $result.Add($line.ToString())
+    }
+    return @($result)
+}
+
+function Get-UiHorizontalSlice {
+    param(
+        [AllowEmptyString()][string]$Text = '',
+        [int]$Offset = 0,
+        [int]$Width
+    )
+
+    $Width = [Math]::Max(1, $Width)
+    $maximumOffset = [Math]::Max(0, $Text.Length - $Width)
+    $Offset = [Math]::Max(0, [Math]::Min($Offset, $maximumOffset))
+    $length = [Math]::Min($Width, $Text.Length - $Offset)
+    if ($length -le 0) { return '' }
+    return $Text.Substring($Offset, $length)
+}
+
+function New-UiHorizontalPanIndicator {
+    param(
+        [int]$Offset = 0,
+        [int]$MaximumOffset = 0,
+        [int]$ViewportWidth,
+        [int]$Width = 60,
+        [int]$TrackWidth = 12,
+        [string]$Label = 'table pan'
+    )
+
+    $Width = [Math]::Max(1, $Width)
+    $MaximumOffset = [Math]::Max(0, $MaximumOffset)
+    if ($MaximumOffset -eq 0) { return '' }
+    $Offset = [Math]::Max(0, [Math]::Min($Offset, $MaximumOffset))
+    $TrackWidth = [Math]::Max(4, $TrackWidth)
+
+    $logicalWidth = [Math]::Max(1, $ViewportWidth + $MaximumOffset)
+    $thumbWidth = [Math]::Max(1, [int][Math]::Round($TrackWidth * ([double]$ViewportWidth / $logicalWidth)))
+    $thumbWidth = [Math]::Min($TrackWidth, $thumbWidth)
+    $thumbStart = [int][Math]::Round(($TrackWidth - $thumbWidth) * ([double]$Offset / $MaximumOffset))
+    $full = if ($script:UseAsciiUiGlyphs) { '#' } else { [string][char]0x2588 }
+    $empty = if ($script:UseAsciiUiGlyphs) { '-' } else { [string][char]0x2591 }
+    $track = ($empty * $thumbStart) + ($full * $thumbWidth) + ($empty * ($TrackWidth - $thumbStart - $thumbWidth))
+    $leftRight = "$(Get-UiGlyph -Name Left)/$(Get-UiGlyph -Name Right)"
+    $text = "$leftRight $Label    [$track]  $Offset/$MaximumOffset columns"
+    if ($text.Length -le $Width) { return $text }
+
+    $compact = "$leftRight [$track] $Offset/$MaximumOffset"
+    if ($compact.Length -le $Width) { return $compact }
+    return Get-UiHorizontalSlice -Text $compact -Width $Width
+}
+
 function Write-UiFrame {
     param(
         [Parameter(Mandatory)][System.Text.StringBuilder]$Frame,

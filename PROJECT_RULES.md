@@ -5,8 +5,8 @@
 - `DiskHealth.ps1` is the canonical entrypoint. A no-argument launch must ask `💻 Local computer` or `🌐 Network computer (WinRM)` before performing any collection; the Local disk menu contains disks only. `ESC` navigates one level back in child menus and exits only from the main menu. `Get-DiskHealth.ps1` is compatibility-only.
 - Όλα τα interactive screens χρησιμοποιούν το vendored canonical `PS_UI_Blueprint.psm1` και επαληθεύουν το `PS_UI_Blueprint.sha256` στο startup. Μην επαναφέρετε cursor-position subtraction, partial redraw ή static `Write-Host` + blocking `ReadKey` report screen.
 - Το diagnostic report πρέπει να παράγεται μία φορά από την υπάρχουσα SMART λογική ως captured `HostInformationMessage` records και να αποδίδεται είτε από το responsive TUI είτε από το plain `-NoUI` replay. Μην δημιουργείτε δεύτερο diagnostic renderer με ξεχωριστούς health rules.
-- Το SMART table χρησιμοποιεί progressive responsive layout: natural table στο wide viewport, adaptive ίδιων στηλών με vertical cell wrapping στο medium viewport και stacked rows μόνο όταν δεν χωρά αναγνώσιμο table. Μην επαναφέρετε ένα απότομο breakpoint που αλλάζει ολόκληρο το visual model για διαφορά λίγων columns.
-- Κάθε αλλαγή TUI πρέπει να περάσει το DiskHealth sequential VT replay `120 -> 101 -> 100 -> 99 -> 98 -> 80 -> 60 -> 120`, με raw CRLF και zero wraps/scrolls/duplicate banners/stale frames.
+- Το SMART table χρησιμοποιεί progressive responsive layout: natural table στο wide viewport, adaptive ίδιων στηλών με vertical cell wrapping στο medium viewport και horizontal table-only pan κάτω από το minimum readable width. Μην επαναφέρετε stacked cards ή breakpoint που αλλάζει ολόκληρο το visual model.
+- Κάθε αλλαγή TUI πρέπει να περάσει το DiskHealth sequential VT replay `120 -> 101 -> 100 -> 99 -> 98 -> 80 -> 60 -> 50 -> 120`, με raw CRLF και zero wraps/scrolls/duplicate banners/stale frames.
 - Preserve raw S.M.A.R.T./NVMe values. Never replace an overflow, parse failure, or implausible counter with zero.
 - Separate remaining-life estimates from overall diagnostic status.
 - HDDs have no standardized SSD-style wear percentage: display `GOOD (SMART)`, explain the evidence model, decode WD spin-up milliseconds and packed ATA power-on hours, and reserve yellow/red exclusively for diagnostic warnings rather than neutral identity/link values.
@@ -23,6 +23,14 @@
 - Do not query `Get-StorageReliabilityCounter` for USB storage. Use deterministic physical-drive mapping before slow smartctl identity probes, and retain `-Benchmark` phase evidence for performance regressions.
 
 ## Decision History
+
+### 2026-07-29 — Shared adaptive table mechanics and narrow horizontal pan
+
+- **Problem:** Μετά το σωστό medium-width reflow, το table άλλαζε ακόμη σε stacked cards μόλις περνούσε κάτω από το minimum readable width. Η αλλαγή visual model ήταν πολύ πιο δραματική από ένα κανονικό horizontal viewport.
+- **Root cause:** Ο downstream renderer είχε το responsive column algorithm τοπικά και δεν υπήρχε reusable horizontal table viewport/indicator στο canonical blueprint.
+- **Guardrail:** Το shared blueprint κατέχει μόνο τα stateless mechanics: ordered column shrinking, cell wrapping, border/row rendering, horizontal slicing και proportional pan indicator. Το DiskHealth κατέχει το SMART schema. Κάτω από το `56`-column logical table minimum, μόνο οι table rows κάνουν pan με `←/→`; το prose εξακολουθεί να κάνει vertical wrap. Το indicator εμφανίζεται μόνο όταν υπάρχει κρυμμένο horizontal range.
+- **Files affected:** `DiskHealth.ps1`, `PS_UI_Blueprint.psm1`, `PS_UI_Blueprint.sha256`, `tests\TuiResizeRegression.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
+- **Validation:** Όλα τα εννέα DiskHealth regression/integration tests πέρασαν σε PowerShell 7. Το focused report renderer πέρασε και σε Windows PowerShell 5.1. Το pinned `pyte` replay πέρασε `120→101→100→99→98→80→60→50→120` με zero wraps/scrolls/stale frames, ενώ parser, PSScriptAnalyzer error-severity και shared exact-hash verification πέρασαν.
 
 ### 2026-07-29 — Progressive SMART table reflow
 

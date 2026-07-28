@@ -1054,7 +1054,6 @@ function Get-DiskHealthAdaptiveTableWidths {
         # Shrink the descriptive fields first, then abbreviate numeric headers;
         # cell contents wrap vertically instead of changing to a card layout.
         if ($contentBudget -lt 35) { return @() }
-        $widths = [int[]]@(4, 34, 7, 7, 9, 17)
         $shrinkPlan = @(
             [pscustomobject]@{ Index = 1; Minimum = 16 }
             [pscustomobject]@{ Index = 5; Minimum = 10 }
@@ -1064,16 +1063,10 @@ function Get-DiskHealthAdaptiveTableWidths {
             [pscustomobject]@{ Index = 1; Minimum = 10 }
             [pscustomobject]@{ Index = 5; Minimum = 8 }
         )
-        $deficit = [Math]::Max(0, ($widths | Measure-Object -Sum).Sum - $contentBudget)
-        foreach ($step in $shrinkPlan) {
-            if ($deficit -le 0) { break }
-            $available = $widths[$step.Index] - $step.Minimum
-            $reduction = [Math]::Min($deficit, $available)
-            $widths[$step.Index] -= $reduction
-            $deficit -= $reduction
-        }
-        if ($deficit -gt 0) { return @() }
-        return @($widths)
+        return @(Get-UiAdaptiveColumnWidths `
+                -PreferredWidths ([int[]]@(4, 34, 7, 7, 9, 17)) `
+                -ShrinkPlan $shrinkPlan `
+                -ContentWidth $contentBudget)
     }
 
     if ($ColumnCount -eq 2) {
@@ -1138,11 +1131,7 @@ function ConvertTo-DiskHealthAdaptiveTableLines {
         if ($widths.Count -ne $segments.Count) {
             return @(ConvertTo-DiskHealthCompactTableLines -Text $Text -Width $Width)
         }
-        $border = [System.Text.StringBuilder]::new($indent + '+')
-        foreach ($cellWidth in $widths) {
-            $null = $border.Append(('-' * ($cellWidth + 2)) + '+')
-        }
-        return @($border.ToString())
+        return @(New-UiAdaptiveTableBorder -Widths $widths -Indent $indent)
     }
 
     if (-not ($trimmed.StartsWith('|') -and $trimmed.EndsWith('|'))) {
@@ -1160,27 +1149,12 @@ function ConvertTo-DiskHealthAdaptiveTableLines {
         $cells = @(Get-DiskHealthAdaptiveHeaderCells -Cells $cells -Widths $widths)
     }
 
-    $cellLines = [System.Collections.Generic.List[object]]::new()
-    $rowHeight = 1
-    for ($cellIndex = 0; $cellIndex -lt $cells.Count; $cellIndex++) {
-        $wrappedCell = @(Split-DiskHealthReportText -Text $cells[$cellIndex] -Width $widths[$cellIndex])
-        $cellLines.Add($wrappedCell)
-        $rowHeight = [Math]::Max($rowHeight, $wrappedCell.Count)
-    }
-
-    $result = [System.Collections.Generic.List[string]]::new()
-    for ($lineIndex = 0; $lineIndex -lt $rowHeight; $lineIndex++) {
-        $line = [System.Text.StringBuilder]::new($indent)
-        for ($cellIndex = 0; $cellIndex -lt $cells.Count; $cellIndex++) {
-            $value = if ($lineIndex -lt $cellLines[$cellIndex].Count) { [string]$cellLines[$cellIndex][$lineIndex] } else { '' }
-            $alignRight = -not $isHeader -and $cellIndex -ge 2
-            $padded = if ($alignRight) { $value.PadLeft($widths[$cellIndex]) } else { $value.PadRight($widths[$cellIndex]) }
-            $null = $line.Append('| ' + $padded + ' ')
-        }
-        $null = $line.Append('|')
-        $result.Add($line.ToString())
-    }
-    return @($result)
+    $rightAlignedColumns = if ($isHeader) { @() } else { @(2, 3, 4, 5) }
+    return @(ConvertTo-UiAdaptiveTableRowLines `
+            -Cells $cells `
+            -Widths $widths `
+            -RightAlignedColumns $rightAlignedColumns `
+            -Indent $indent)
 }
 
 function Get-DiskHealthReportAnsiColor {
@@ -1199,7 +1173,8 @@ function Get-DiskHealthReportAnsiColor {
 function Get-DiskHealthReportDisplayLines {
     param(
         [Parameter(Mandatory)][object[]]$Rows,
-        [int]$Width
+        [int]$Width,
+        [int]$HorizontalOffset = 0
     )
 
     $Width = [Math]::Max(1, $Width)
@@ -1207,8 +1182,10 @@ function Get-DiskHealthReportDisplayLines {
     foreach ($row in $Rows) {
         $plainText = [string]$row.Text
         $trimmedStart = $plainText.TrimStart()
-        $wrapped = if ($trimmedStart.StartsWith('+') -or $trimmedStart.StartsWith('|')) {
-            @(ConvertTo-DiskHealthAdaptiveTableLines -Text $plainText -Width $Width)
+        $isTableLine = $trimmedStart.StartsWith('+') -or $trimmedStart.StartsWith('|')
+        $tableRenderWidth = [Math]::Max(56, $Width)
+        $wrapped = if ($isTableLine) {
+            @(ConvertTo-DiskHealthAdaptiveTableLines -Text $plainText -Width $tableRenderWidth)
         }
         else {
             @(Split-DiskHealthReportText -Text $plainText -Width $Width)
@@ -1216,9 +1193,17 @@ function Get-DiskHealthReportDisplayLines {
 
         $ansiColor = Get-DiskHealthReportAnsiColor -Color ([string]$row.Color)
         foreach ($line in $wrapped) {
+            $horizontalMaximum = if ($isTableLine) { [Math]::Max(0, ([string]$line).Length - $Width) } else { 0 }
+            $visibleLine = if ($horizontalMaximum -gt 0) {
+                Get-UiHorizontalSlice -Text ([string]$line) -Offset $HorizontalOffset -Width $Width
+            }
+            else {
+                [string]$line
+            }
             $displayLines.Add([pscustomobject]@{
-                    PlainText = [string]$line
-                    Text      = "$ansiColor$line$($_C.Reset)$($_C.EraseLn)"
+                    PlainText         = $visibleLine
+                    Text              = "$ansiColor$visibleLine$($_C.Reset)$($_C.EraseLn)"
+                    HorizontalMaximum = $horizontalMaximum
                 })
         }
     }
@@ -1231,6 +1216,7 @@ function New-DiskHealthReportFrame {
         [int]$Width,
         [int]$WindowHeight,
         [int]$ScrollOffset = 0,
+        [int]$HorizontalOffset = 0,
         [AllowEmptyString()][string]$Target = '',
         [AllowEmptyString()][string]$StateMarker = ''
     )
@@ -1238,10 +1224,13 @@ function New-DiskHealthReportFrame {
     $Width = [Math]::Max(1, $Width)
     $WindowHeight = [Math]::Max(12, $WindowHeight)
     $contentWidth = [Math]::Max(1, $Width - 2)
-    $displayLines = @(Get-DiskHealthReportDisplayLines -Rows $Rows -Width $contentWidth)
+    $displayLines = @(Get-DiskHealthReportDisplayLines -Rows $Rows -Width $contentWidth -HorizontalOffset $HorizontalOffset)
+    $maximumHorizontalOffset = [int](@($displayLines.HorizontalMaximum | Measure-Object -Maximum).Maximum)
+    $HorizontalOffset = [Math]::Max(0, [Math]::Min($HorizontalOffset, $maximumHorizontalOffset))
+    $panRowCount = if ($maximumHorizontalOffset -gt 0) { 1 } else { 0 }
     # Leave one physical row unused; writing into the bottom-right cell can force
     # Windows Terminal to scroll even when every individual line fits the width.
-    $visibleBudget = [Math]::Max(1, $WindowHeight - 11)
+    $visibleBudget = [Math]::Max(1, $WindowHeight - 11 - $panRowCount)
     $maximumOffset = [Math]::Max(0, $displayLines.Count - $visibleBudget)
     $ScrollOffset = [Math]::Max(0, [Math]::Min($ScrollOffset, $maximumOffset))
     $visibleEnd = [Math]::Min($displayLines.Count - 1, $ScrollOffset + $visibleBudget - 1)
@@ -1268,17 +1257,29 @@ function New-DiskHealthReportFrame {
     $belowCount = [Math]::Max(0, $displayLines.Count - 1 - $visibleEnd)
     $belowText = if ($belowCount -gt 0) { "  $(Get-UiGlyph -Name Down) $belowCount more below" } else { '' }
     Add-UiFrameLine -Frame $frame -Text "$($_C.Dim)$belowText$($_C.Reset)$($_C.EraseLn)"
+    if ($maximumHorizontalOffset -gt 0) {
+        $panIndicator = New-UiHorizontalPanIndicator `
+            -Offset $HorizontalOffset `
+            -MaximumOffset $maximumHorizontalOffset `
+            -ViewportWidth $contentWidth `
+            -Width $contentWidth
+        Add-UiFrameLine -Frame $frame -Text "$($_C.H2)  $panIndicator$($_C.Reset)$($_C.EraseLn)"
+    }
     Add-UiFrameLine -Frame $frame
-    Add-UiFrameShortcutSegments -Frame $frame -Segments @(
-        (New-UiShortcutSegment -Text 'Up/Down' -Color $_C.White)
-        (New-UiShortcutSegment -Text ' scroll   ' -Color $_C.Dim)
-        (New-UiShortcutSegment -Text 'PgUp/PgDn' -Color $_C.White)
-        (New-UiShortcutSegment -Text ' page   ' -Color $_C.Dim)
-        (New-UiShortcutSegment -Text 'Home/End' -Color $_C.White)
-        (New-UiShortcutSegment -Text ' jump   ' -Color $_C.Dim)
-        (New-UiShortcutSegment -Text 'Esc' -Color $_C.Fail)
-        (New-UiShortcutSegment -Text ' back' -Color $_C.Dim)
-    ) -Width $Width
+    $shortcutSegments = [System.Collections.Generic.List[object]]::new()
+    if ($maximumHorizontalOffset -gt 0) {
+        $shortcutSegments.Add((New-UiShortcutSegment -Text 'Left/Right' -Color $_C.White))
+        $shortcutSegments.Add((New-UiShortcutSegment -Text ' pan   ' -Color $_C.Dim))
+    }
+    $shortcutSegments.Add((New-UiShortcutSegment -Text 'Up/Down' -Color $_C.White))
+    $shortcutSegments.Add((New-UiShortcutSegment -Text ' scroll   ' -Color $_C.Dim))
+    $shortcutSegments.Add((New-UiShortcutSegment -Text 'PgUp/PgDn' -Color $_C.White))
+    $shortcutSegments.Add((New-UiShortcutSegment -Text ' page   ' -Color $_C.Dim))
+    $shortcutSegments.Add((New-UiShortcutSegment -Text 'Home/End' -Color $_C.White))
+    $shortcutSegments.Add((New-UiShortcutSegment -Text ' jump   ' -Color $_C.Dim))
+    $shortcutSegments.Add((New-UiShortcutSegment -Text 'Esc' -Color $_C.Fail))
+    $shortcutSegments.Add((New-UiShortcutSegment -Text ' back' -Color $_C.Dim))
+    Add-UiFrameShortcutSegments -Frame $frame -Segments @($shortcutSegments) -Width $Width
 
     return [pscustomobject]@{
         Frame         = $frame
@@ -1286,6 +1287,8 @@ function New-DiskHealthReportFrame {
         ScrollOffset  = $ScrollOffset
         MaximumOffset = $maximumOffset
         VisibleBudget = $visibleBudget
+        HorizontalOffset = $HorizontalOffset
+        MaximumHorizontalOffset = $maximumHorizontalOffset
     }
 }
 
@@ -1307,6 +1310,7 @@ function Show-DiskHealthReport {
     )
 
     $scrollOffset = 0
+    $horizontalOffset = 0
     Initialize-TuiHost
     try {
         while ($true) {
@@ -1320,8 +1324,9 @@ function Show-DiskHealthReport {
                 $height = 30
             }
 
-            $view = New-DiskHealthReportFrame -Rows $Rows -Width $width -WindowHeight $height -ScrollOffset $scrollOffset -Target $Target
+            $view = New-DiskHealthReportFrame -Rows $Rows -Width $width -WindowHeight $height -ScrollOffset $scrollOffset -HorizontalOffset $horizontalOffset -Target $Target
             $scrollOffset = $view.ScrollOffset
+            $horizontalOffset = $view.HorizontalOffset
             [Console]::Write((Get-DiskHealthReportFramePayload -Frame $view.Frame -ForceClear:$script:RequestForceClear))
             $script:RequestForceClear = $false
 
@@ -1333,6 +1338,8 @@ function Show-DiskHealthReport {
                 'PageDown'   { $scrollOffset = [Math]::Min($view.MaximumOffset, $scrollOffset + $view.VisibleBudget) }
                 'Home'       { $scrollOffset = 0 }
                 'End'        { $scrollOffset = $view.MaximumOffset }
+                'LeftArrow'  { $horizontalOffset = [Math]::Max(0, $horizontalOffset - 4) }
+                'RightArrow' { $horizontalOffset = [Math]::Min($view.MaximumHorizontalOffset, $horizontalOffset + 4) }
                 'Escape'     { return }
                 'Enter'      { return }
                 'ResizeEvent' { continue }
