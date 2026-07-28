@@ -12,7 +12,7 @@ if ($parseErrors) {
     throw "Production script has parser errors: $($parseErrors -join '; ')"
 }
 
-foreach ($functionName in @('Get-AtaTemperatureCelsius', 'Get-AtaSpinUpTimeDisplay', 'Get-AtaPowerOnHoursValue', 'Get-SeagateNormalizedRateState')) {
+foreach ($functionName in @('Get-AtaTemperatureCelsius', 'Get-AtaSpinUpTimeDisplay', 'Get-AtaPowerOnHoursValue', 'Get-SeagateNormalizedRateState', 'Get-SeagateReadEccContext')) {
     $functionAst = $ast.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
@@ -67,6 +67,31 @@ Assert-Equal (Get-SeagateNormalizedRateState -AttributeId 0xC3 -Current 80 -Thre
 Assert-Equal (Get-SeagateNormalizedRateState -AttributeId 0x01 -Current 6 -Threshold 6 -IsSeagateHdd $true) 'ThresholdCrossed' 'Seagate normalized threshold crossing'
 Assert-Equal (Get-SeagateNormalizedRateState -AttributeId 0x01 -Current 80 -Threshold 6 -IsSeagateHdd $false) 'NotApplicable' 'Non-Seagate drive retains its profile rules'
 
+$seagateContextAttributes = @(
+    [PSCustomObject]@{ ID = 0x01; Current = 80; Worst = 64; Threshold = 6; Raw = [uint64]110952844 }
+    [PSCustomObject]@{ ID = 0x05; Current = 100; Worst = 100; Threshold = 10; Raw = [uint64]0 }
+    [PSCustomObject]@{ ID = 0xBB; Current = 100; Worst = 100; Threshold = 0; Raw = [uint64]0 }
+    [PSCustomObject]@{ ID = 0xC3; Current = 80; Worst = 64; Threshold = 0; Raw = [uint64]110952844 }
+    [PSCustomObject]@{ ID = 0xC5; Current = 100; Worst = 100; Threshold = 0; Raw = [uint64]0 }
+    [PSCustomObject]@{ ID = 0xC6; Current = 100; Worst = 100; Threshold = 0; Raw = [uint64]0 }
+)
+$seagateContextSmart = [PSCustomObject]@{
+    ata_smart_error_log = [PSCustomObject]@{
+        summary = [PSCustomObject]@{ count = 0 }
+    }
+}
+$seagateContext = Get-SeagateReadEccContext -Attributes $seagateContextAttributes -SmartData $seagateContextSmart -IsSeagateHdd $true
+Assert-Equal $seagateContext.HasMirroredRawTelemetry $true 'Seagate 01/C3 mirrored raw telemetry'
+Assert-Equal $seagateContext.HasUnresolvedIndicators $false 'Seagate zero unresolved indicators'
+Assert-Equal $seagateContext.ErrorLogCount 0 'Seagate SMART error log count'
+
+$pendingContextAttributes = @($seagateContextAttributes | ForEach-Object {
+    if ($_.ID -eq 0xC5) { [PSCustomObject]@{ ID = $_.ID; Current = $_.Current; Worst = $_.Worst; Threshold = $_.Threshold; Raw = [uint64]2 } }
+    else { $_ }
+})
+$pendingContext = Get-SeagateReadEccContext -Attributes $pendingContextAttributes -SmartData $seagateContextSmart -IsSeagateHdd $true
+Assert-Equal $pendingContext.HasUnresolvedIndicators $true 'Seagate pending sector remains a warning'
+
 $productionText = Get-Content -LiteralPath $scriptPath -Raw
 if (-not $productionText.Contains("if (`$null -eq `$health -and `$isRotationalMedia) { 'SMART' }")) {
     throw 'HDD status must identify SMART-based evaluation instead of displaying N/A.'
@@ -79,6 +104,12 @@ if (-not $productionText.Contains('Το Current πάνω από Threshold σημ
 }
 if (-not $productionText.Contains("if (`$seagateRateState -eq 'ThresholdCrossed') { `$lineColor = `$Red }")) {
     throw 'Seagate proprietary rate rows must remain neutral unless the firmware threshold is crossed.'
+}
+if (-not $productionText.Contains('| Score   | Worst   | Fail <=   | Vendor Raw')) {
+    throw 'ATA SMART table must identify normalized scores and opaque vendor raw values.'
+}
+if (-not $productionText.Contains('### 🔵 Seagate Read / ECC Context')) {
+    throw 'Missing dedicated Seagate read/ECC context block.'
 }
 
 Write-Host 'PASS: ATA temperature, Seagate rate, and HDD presentation regression fixtures.' -ForegroundColor Green

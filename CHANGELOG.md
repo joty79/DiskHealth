@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.8] - 2026-07-28
+
+### Changed
+- Renamed ATA table columns from ambiguous `Current / Worst / Threshold / Raw Value` to `Score / Worst / Fail <= / Vendor Raw` and added an inline explanation that normalized scores are neither error counts nor percentages.
+- Added a dedicated `Seagate Read / ECC Context` block. It identifies identical `01 Raw Read Error Rate` and `C3 Hardware ECC Recovered` raw telemetry without inventing a decode, explains the proprietary score/failure-floor semantics, and reports reallocated, reported-uncorrectable, pending, offline-uncorrectable, and SMART error-log evidence separately.
+
+### Tests
+- Added mirrored `01/C3`, zero-error-log, and pending-sector fixtures plus presentation guards for the new ATA headings and Seagate context block.
+- Passed all eight local regression/integration suites, Windows PowerShell 5.1 compatibility, PSScriptAnalyzer with zero errors, and an elevated live WinRM render against `NEOS / 192.168.1.6` using the real `ST8000DM004-2U9188` telemetry.
+
 ## [1.23.7] - 2026-07-28
 
 ### Fixed

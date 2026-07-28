@@ -185,7 +185,9 @@ For SATA drives, the script retrieves the raw 512-byte array from `MSStorageDriv
 <details>
 <summary><b>Why can Seagate Raw Read Error Rate show a very large raw number?</b></summary>
 
-For Seagate HDDs, the individual values of `0x01 Raw Read Error Rate`, `0x07 Seek Error Rate`, and `0xC3 Hardware ECC Recovered` are proprietary and must not be interpreted as vendor-independent health measurements or standalone totals of failed operations. `Current > Threshold` means only that the attribute has not triggered its firmware failure condition; it does not prove that the measurement is “normal.” DiskHealth therefore keeps these rows neutral unless a threshold is crossed, while separately enforcing the SMART overall result and explicit media-risk counters such as reallocated, pending, and offline-uncorrectable sectors.
+For Seagate HDDs, the individual values of `0x01 Raw Read Error Rate`, `0x07 Seek Error Rate`, and `0xC3 Hardware ECC Recovered` are proprietary and must not be interpreted as vendor-independent health measurements or standalone totals of failed operations. `Current > Threshold` means only that the attribute has not triggered its firmware failure condition; it does not prove that the measurement is “normal.”
+
+The ATA table therefore labels these columns as `Score`, `Worst`, `Fail <=`, and `Vendor Raw`. A dedicated **Seagate Read / ECC Context** block identifies mirrored `01/C3` telemetry without guessing its encoding, then reports the independently understandable unresolved evidence: reallocated sectors, reported uncorrectable errors, pending sectors, offline-uncorrectable sectors, and the SMART error-log count.
 
 </details>
 

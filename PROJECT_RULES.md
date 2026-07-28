@@ -165,3 +165,11 @@
 - **Guardrail:** `Current > Threshold` means only “this attribute has not triggered its firmware failure condition.” Keep proprietary Seagate `01/07/C3` rows neutral unless a threshold is crossed; never label an above-threshold individual attribute as healthy or normal without a vendor-supported interpretation.
 - **Files affected:** `DiskHealth.ps1`, `tests\AtaTelemetry.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
 - **Validation:** All eight regression/integration suites, the focused Windows PowerShell 5.1 fixture, parser validation, PSScriptAnalyzer error review, and `git diff --check` passed. The fixture asserts neutral `AboveThreshold`/`NoThreshold` states and red only for `ThresholdCrossed`.
+
+### 2026-07-28 — Present Seagate read/ECC telemetry without decoding fiction
+
+- **Problem:** `Raw Read Error Rate`, `Current`, `Threshold`, and `Raw Value` looked like an error count, acceptable-error limit, and measured rate. Matching `01` and `C3` raw values suggested shared read/ECC telemetry but did not reveal its proprietary encoding.
+- **Root cause:** Low-level ATA field names were copied directly into a technician-facing table, mixing vendor-normalized scores, firmware failure floors, and opaque raw evidence in one visual language.
+- **Guardrail:** Label ATA columns `Score`, `Worst`, `Fail <=`, and `Vendor Raw`. For Seagate HDDs, identify identical `01/C3` telemetry as shared proprietary evidence without converting it to an error count. Present reallocated, reported-uncorrectable, pending, offline-uncorrectable, and SMART error-log counters separately, and state only whether unresolved evidence was recorded in the snapshot.
+- **Files affected:** `DiskHealth.ps1`, `tests\AtaTelemetry.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
+- **Validation:** All eight regression/integration suites, the focused Windows PowerShell 5.1 fixture, parser validation, PSScriptAnalyzer error review, and `git diff --check` passed. An elevated live WinRM render against `NEOS / 192.168.1.6` confirmed the new headings, mirrored `01/C3` explanation, five zero unresolved indicators, and absence of any invented error-count claim.

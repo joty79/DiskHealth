@@ -768,6 +768,60 @@ function Get-SeagateNormalizedRateState {
     return 'AboveThreshold'
 }
 
+function Get-SeagateReadEccContext {
+    param(
+        [AllowNull()][object[]]$Attributes,
+        [AllowNull()]$SmartData,
+        [bool]$IsSeagateHdd
+    )
+
+    if (-not $IsSeagateHdd) {
+        return $null
+    }
+
+    $readRate = $Attributes | Where-Object { $_.ID -eq 0x01 } | Select-Object -First 1
+    $hardwareEcc = $Attributes | Where-Object { $_.ID -eq 0xC3 } | Select-Object -First 1
+    if (-not $readRate -or -not $hardwareEcc) {
+        return $null
+    }
+
+    $counterValues = @{}
+    foreach ($counterId in @(0x05, 0xBB, 0xC5, 0xC6)) {
+        $counterAttribute = $Attributes | Where-Object { $_.ID -eq $counterId } | Select-Object -First 1
+        $counterValues[$counterId] = if ($counterAttribute) { [uint64]$counterAttribute.Raw } else { $null }
+    }
+
+    $errorLogCount = $null
+    $errorLogProperty = if ($null -ne $SmartData) { $SmartData.PSObject.Properties['ata_smart_error_log'] } else { $null }
+    $summaryProperty = if ($null -ne $errorLogProperty -and $null -ne $errorLogProperty.Value) { $errorLogProperty.Value.PSObject.Properties['summary'] } else { $null }
+    $countProperty = if ($null -ne $summaryProperty -and $null -ne $summaryProperty.Value) { $summaryProperty.Value.PSObject.Properties['count'] } else { $null }
+    if ($null -ne $countProperty -and $null -ne $countProperty.Value) {
+        $errorLogCount = [uint64]$countProperty.Value
+    }
+
+    $hasUnresolvedIndicators = @(
+        $counterValues.Values | Where-Object { $null -ne $_ -and $_ -gt 0 }
+    ).Count -gt 0
+    if ($null -ne $errorLogCount -and $errorLogCount -gt 0) {
+        $hasUnresolvedIndicators = $true
+    }
+
+    return [PSCustomObject]@{
+        Current                 = [int]$readRate.Current
+        Worst                   = [int]$readRate.Worst
+        Threshold               = [int]$readRate.Threshold
+        ReadRaw                 = [uint64]$readRate.Raw
+        EccRaw                  = [uint64]$hardwareEcc.Raw
+        HasMirroredRawTelemetry = ([uint64]$readRate.Raw -eq [uint64]$hardwareEcc.Raw)
+        Reallocated             = $counterValues[0x05]
+        ReportedUncorrectable   = $counterValues[0xBB]
+        Pending                 = $counterValues[0xC5]
+        OfflineUncorrectable    = $counterValues[0xC6]
+        ErrorLogCount           = $errorLogCount
+        HasUnresolvedIndicators = $hasUnresolvedIndicators
+    }
+}
+
 # Επιλογή ATA telemetry profile από model/firmware και, κυρίως, από το πραγματικό
 # attribute layout. Το brand μόνο του δεν αρκεί: διαφορετικά Patriot/Intenso SSDs
 # χρησιμοποιούν διαφορετικούς controllers και διαφορετική σημασία για τα ίδια IDs.
@@ -2666,8 +2720,16 @@ while ($runLoop) {
     # 6. S.M.A.R.T. Table
     Write-Host "### 🔵 Ανάλυση S.M.A.R.T. Τιμών" -ForegroundColor $Cyan
     Write-Host "  +------+------------------------------------+---------+---------+-----------+-------------------+" -ForegroundColor $Gray
-    Write-Host "  | ID   | Attribute Name                     | Current | Worst   | Threshold | Raw Value         |" -ForegroundColor $Gray
+    if ($brand -eq 'NVMe') {
+        Write-Host "  | ID   | Attribute Name                     | Current | Worst   | Threshold | Value             |" -ForegroundColor $Gray
+    } else {
+        Write-Host "  | ID   | Attribute Name                     | Score   | Worst   | Fail <=   | Vendor Raw        |" -ForegroundColor $Gray
+    }
     Write-Host "  +------+------------------------------------+---------+---------+-----------+-------------------+" -ForegroundColor $Gray
+
+    if ($brand -ne 'NVMe') {
+        Write-Host "  🔸 Score/Worst = vendor-normalized values, όχι errors ή percentages. Fail <= = firmware failure floor." -ForegroundColor $Gray
+    }
 
     $visibleAttributes = $attributes | Sort-Object ID
 
@@ -2781,6 +2843,33 @@ while ($runLoop) {
     }
     Write-Host "  +------+------------------------------------+---------+---------+-----------+-------------------+" -ForegroundColor $Gray
     Write-Host ""
+
+    $seagateReadEcc = Get-SeagateReadEccContext -Attributes $attributes -SmartData $smart -IsSeagateHdd $isSeagateHdd
+    if ($null -ne $seagateReadEcc) {
+        Write-Host "### 🔵 Seagate Read / ECC Context" -ForegroundColor $Cyan
+        Write-Host "  🔸 Vendor score: Current $($seagateReadEcc.Current), Worst $($seagateReadEcc.Worst), firmware failure floor $($seagateReadEcc.Threshold)." -ForegroundColor $Gray
+        Write-Host "     Τα παραπάνω είναι proprietary scores — όχι αριθμός errors, error rate ή health percentage." -ForegroundColor $Gray
+
+        if ($seagateReadEcc.HasMirroredRawTelemetry) {
+            Write-Host "  🔸 Τα 01 Raw Read Error Rate και C3 Hardware ECC Recovered εκθέτουν το ίδιο Vendor Raw: $($seagateReadEcc.ReadRaw)." -ForegroundColor $Gray
+            Write-Host "     Η κοινή τιμή δείχνει shared read/ECC telemetry· η Seagate δεν δημοσιεύει αποκωδικοποίηση ή μονάδα μέτρησης." -ForegroundColor $Gray
+        } else {
+            Write-Host "  🔸 Vendor Raw 01: $($seagateReadEcc.ReadRaw) | Vendor Raw C3: $($seagateReadEcc.EccRaw)." -ForegroundColor $Gray
+            Write-Host "     Οι τιμές διατηρούνται για baseline/trend comparison και δεν μετατρέπονται σε υποθετικό error count." -ForegroundColor $Gray
+        }
+
+        $errorLogDisplay = if ($null -eq $seagateReadEcc.ErrorLogCount) { 'N/A' } else { "$($seagateReadEcc.ErrorLogCount)" }
+        Write-Host "  🔸 Unresolved evidence: Reallocated=$($seagateReadEcc.Reallocated) | Reported Uncorrectable=$($seagateReadEcc.ReportedUncorrectable) | Pending=$($seagateReadEcc.Pending) | Offline Uncorrectable=$($seagateReadEcc.OfflineUncorrectable) | SMART Error Log=$errorLogDisplay" -ForegroundColor $Gray
+
+        if ($seagateReadEcc.HasUnresolvedIndicators) {
+            Write-Host "  ⚠️ Υπάρχει τουλάχιστον ένας καταγεγραμμένος unresolved/media indicator· απαιτείται ξεχωριστή αξιολόγηση και test." -ForegroundColor $Yellow
+        } elseif ($null -ne $seagateReadEcc.ErrorLogCount) {
+            Write-Host "  ✅ Δεν καταγράφηκε unresolved read/media error στα διαθέσιμα counters και στο SMART Error Log αυτού του snapshot." -ForegroundColor $Green
+        } else {
+            Write-Host "  🔸 Δεν καταγράφηκε unresolved read/media error στα διαθέσιμα counters· το SMART Error Log δεν ήταν διαθέσιμο." -ForegroundColor $Gray
+        }
+        Write-Host ""
+    }
 
     # 7. Συμπέρασμα & Ενέργειες (Conclusion)
     Write-Host "### 🔵 Συμπέρασμα & Ενέργειες" -ForegroundColor $Cyan
