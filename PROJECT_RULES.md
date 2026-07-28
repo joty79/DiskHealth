@@ -3,6 +3,9 @@
 ## Current Canonical Workflow
 
 - `DiskHealth.ps1` is the canonical entrypoint. A no-argument launch must ask `💻 Local computer` or `🌐 Network computer (WinRM)` before performing any collection; the Local disk menu contains disks only. `ESC` navigates one level back in child menus and exits only from the main menu. `Get-DiskHealth.ps1` is compatibility-only.
+- Όλα τα interactive screens χρησιμοποιούν το vendored canonical `PS_UI_Blueprint.psm1` και επαληθεύουν το `PS_UI_Blueprint.sha256` στο startup. Μην επαναφέρετε cursor-position subtraction, partial redraw ή static `Write-Host` + blocking `ReadKey` report screen.
+- Το diagnostic report πρέπει να παράγεται μία φορά από την υπάρχουσα SMART λογική ως captured `HostInformationMessage` records και να αποδίδεται είτε από το responsive TUI είτε από το plain `-NoUI` replay. Μην δημιουργείτε δεύτερο diagnostic renderer με ξεχωριστούς health rules.
+- Κάθε αλλαγή TUI πρέπει να περάσει το DiskHealth sequential VT replay `120 -> 101 -> 100 -> 99 -> 98 -> 80 -> 60 -> 120`, με raw CRLF και zero wraps/scrolls/duplicate banners/stale frames.
 - Preserve raw S.M.A.R.T./NVMe values. Never replace an overflow, parse failure, or implausible counter with zero.
 - Separate remaining-life estimates from overall diagnostic status.
 - HDDs have no standardized SSD-style wear percentage: display `GOOD (SMART)`, explain the evidence model, decode WD spin-up milliseconds and packed ATA power-on hours, and reserve yellow/red exclusively for diagnostic warnings rather than neutral identity/link values.
@@ -19,6 +22,14 @@
 - Do not query `Get-StorageReliabilityCounter` for USB storage. Use deterministic physical-drive mapping before slow smartctl identity probes, and retain `-Benchmark` phase evidence for performance regressions.
 
 ## Decision History
+
+### 2026-07-28 — Canonical responsive TUI and buffered diagnostic report
+
+- **Problem:** Το diagnostic screen ήταν εκατοντάδες άμεσα `Write-Host` calls και τελείωνε σε blocking `ReadKey`. Με resize δεν υπήρχε screen state για redraw, οπότε fixed-width SMART borders και wrapped prose έμεναν εκτός frame ή ανακατεύονταν με stale output. Τα menus χρησιμοποιούσαν ξεχωριστό cursor-position subtraction.
+- **Root cause:** Η διαγνωστική παραγωγή, το terminal rendering και το input wait ήταν ενωμένα σε ένα static output path· το DiskHealth επίσης δεν ήταν registered consumer του shared TUI blueprint.
+- **Guardrail:** Φορτώνεται μόνο το pinned canonical `PS_UI_Blueprint.psm1`. Η υπάρχουσα SMART λογική εκτελείται μία φορά και τα `HostInformationMessage` records μετατρέπονται σε logical report rows. Το interactive path κάνει responsive scroll/redraw και compact table fallback, ενώ το `-NoUI` path αναπαράγει το ίδιο capture ως plain output. `ESC` είναι Back στο report και στα child menus.
+- **Files affected:** `DiskHealth.ps1`, `PS_UI_Blueprint.psm1`, `PS_UI_Blueprint.sha256`, `tests\TuiResizeRegression.Tests.ps1`, `tests\ToolingPolicy.Tests.ps1`, `tests\WinRMDiscoveryIntegration.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
+- **Validation:** Parser όλων των scripts/tests, PSScriptAnalyzer error severity, πλήρες regression suite, verified `NoNewline` capture, compact table assertions, `pyte 0.8.2` sequential replay `120→101→100→99→98→80→60→120` με raw CRLF/zero wraps/zero scrolls/zero stale frames, non-admin local `-NoUI` fallback και elevated local NVMe end-to-end run μέσω direct `gsudo.exe`.
 
 ### 2026-07-28 — HDD presentation and packed ATA time counters
 

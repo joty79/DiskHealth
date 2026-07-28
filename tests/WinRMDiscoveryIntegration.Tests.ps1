@@ -75,8 +75,8 @@ $driveMenuSource = $driveMenuFunction.Extent.Text
 if ($driveMenuSource -match 'AllowDiscovery|ReturnLocal|Αναζήτηση υπολογιστών στο LAN') {
     throw 'The disk menu must not expose network discovery or a local-return pseudo-option.'
 }
-$backActionPattern = 'Action\s*=\s*\$\(if\s*\(\$AllowBack\)\s*\{\s*''Back'''
-if ($driveMenuSource -notmatch '\[switch\]\$AllowBack' -or $driveMenuSource -notmatch $backActionPattern) {
+$backActionPattern = '\$escapeAction\s*=\s*if\s*\(\$AllowBack\)\s*\{\s*''Back''\s*\}\s*else\s*\{\s*''Exit''\s*\}'
+if ($driveMenuSource -notmatch '\[switch\]\$AllowBack' -or $driveMenuSource -notmatch $backActionPattern -or $driveMenuSource -notmatch '-EscapeMode\s+\$\(if\s*\(\$AllowBack\)') {
     throw 'The disk menu ESC path must return Back when it was opened from the main menu.'
 }
 

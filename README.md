@@ -50,6 +50,8 @@ It queries native Windows PnP (`Get-PnpDeviceProperty`) telemetry to query **PCI
 
 It also parses exported CrystalDiskInfo txt reports, supporting both SATA and NVMe formats (automatically hiding useless columns, converting raw logs like Kelvin-to-Celsius/sectors-to-GB, and formatting all raw attributes in a readable decimal structure).
 
+Το interactive UI χρησιμοποιεί πλέον το pinned canonical `PS_UI_Blueprint.psm1`. Τα main/disk/network/dependency menus και το diagnostic report σχεδιάζονται ως πλήρη immediate-mode frames, με synchronized single-write output, live resize detection και height budgeting. Το report είναι scrollable με `↑/↓`, `PageUp/PageDown`, `Home/End`, ενώ σε στενό terminal οι fixed-width SMART tables μετατρέπονται σε compact stacked rows αντί να σπάνε από το Windows Terminal auto-wrap.
+
 ```
 +--------------------+               WinRM Session               +----------------------+
 | Local Workstation  | ========================================> |  Remote Target Host  |
@@ -110,6 +112,8 @@ If `smartctl` is missing on an interactive remote target, DiskHealth asks inside
 
 `ESC` means **Back** in every child menu: local disks return to the main menu, remote disks return immediately to the cached PC selector, and the PC selector returns to the main menu. Only `ESC` on the main menu exits the program. Direct CLI parameters bypass the startup menu and remain available for automation.
 
+Στο diagnostic report, `ESC` ή `Enter` επιστρέφει στο disk selector. Το resize του ίδιου ανοιχτού report προκαλεί πλήρες state-driven redraw· δεν χρειάζεται restart του script και δεν χρησιμοποιείται πλέον το παλιό static `Write-Host` + blocking `ReadKey` screen.
+
 `Get-DiskHealth.ps1` remains available as a compatibility launcher and forwards explicitly supplied parameters to `DiskHealth.ps1`.
 
 ---
@@ -157,6 +161,8 @@ DiskHealth/
 │   └── CrystalDiskInfo_20260713101417.png # Backup Samsung SSD CDI screenshot
 ├── DiskHealth.ps1                       # Canonical interactive and CLI entrypoint
 ├── Get-DiskHealth.ps1                   # Backward-compatible launcher
+├── PS_UI_Blueprint.psm1                 # Generated mirror of the canonical shared TUI runtime
+├── PS_UI_Blueprint.sha256               # Pinned SHA-256 receipt checked at startup
 ├── tests/
 │   ├── AtaHealthProfile.Tests.ps1       # Controller profile, health-source, and WD mapping fixtures
 │   ├── AtaTelemetry.Tests.ps1           # Packed ATA temperature regression fixtures
@@ -164,6 +170,7 @@ DiskHealth/
 │   ├── SmartctlBridgeMapping.Tests.ps1   # Windows PhysicalDrive and USB/UASP bridge mapping
 │   ├── RemoteHistoryPerformance.Tests.ps1 # DPAPI/network scope and slow-probe guards
 │   ├── ToolingPolicy.Tests.ps1           # smartmontools acquisition/placement guardrails
+│   ├── TuiResizeRegression.Tests.ps1     # Sequential pyte resize/scroll/stale-frame replay
 │   ├── WinRMConnectionIntegration.Tests.ps1 # Authenticated connector integration guard
 │   └── WinRMDiscoveryIntegration.Tests.ps1 # Discovery integration guard
 ├── README.md                            # You are here
@@ -179,6 +186,15 @@ DiskHealth/
 <summary><b>How are S.M.A.R.T. attributes parsed natively?</b></summary>
 
 For SATA drives, the script retrieves the raw 512-byte array from `MSStorageDriver_FailurePredictData.VendorSpecific` class. It iterates in 12-byte chunks starting at offset 2, extracting the Attribute ID, Current normalized value, Worst normalized value, and the 6-byte raw value (extended to 8 bytes and converted to UInt64).
+
+</details>
+
+<details>
+<summary><b>How is terminal resize kept safe?</b></summary>
+
+Το DiskHealth δεν προσπαθεί να «διορθώσει» παλιές γραμμές με cursor arithmetic. Κάθε interactive frame υπολογίζεται ξανά από το τρέχον `WindowSize`, κρατά μία φυσική γραμμή ασφαλείας ώστε να μην ενεργοποιείται terminal scroll, γράφεται atomically και καθαρίζει το stale υπόλοιπο του προηγούμενου frame.
+
+Το project-specific virtual-terminal regression αναπαράγει διαδοχικά το ίδιο report στα `120 → 101 → 100 → 99 → 98 → 80 → 60 → 120` columns, με raw CRLF bytes. Το test αποτυγχάνει αν βρει line wrap, viewport scroll, duplicate banner ή stale frame marker.
 
 </details>
 

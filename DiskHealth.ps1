@@ -22,6 +22,7 @@
     Καταγράφει discovery, WinRM και storage-probe phase timings στο local DiskHealth state folder.
 #>
 [CmdletBinding()]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingInvokeExpression', '', Justification = 'Loads the pinned canonical PowerShell TUI blueprint into script scope so its state and ANSI palette are shared by DiskHealth.')]
 param(
     [string]$ComputerName = "localhost",
     [string]$Username = "user",
@@ -68,6 +69,18 @@ $script:IsHomeLauncher = (
     -not $PSBoundParameters.ContainsKey('Discover') -and
     -not $EmbeddedRemote
 )
+
+$diskHealthTuiBlueprintPath = Join-Path -Path $PSScriptRoot -ChildPath 'PS_UI_Blueprint.psm1'
+$diskHealthTuiReceiptPath = Join-Path -Path $PSScriptRoot -ChildPath 'PS_UI_Blueprint.sha256'
+if (-not (Test-Path -LiteralPath $diskHealthTuiBlueprintPath -PathType Leaf) -or -not (Test-Path -LiteralPath $diskHealthTuiReceiptPath -PathType Leaf)) {
+    throw '⚠️⚠️⚠️ NEED TOOL: Missing the vendored canonical PowerShell TUI blueprint or its SHA-256 receipt.'
+}
+$diskHealthExpectedTuiHash = (Get-Content -Raw -LiteralPath $diskHealthTuiReceiptPath).Trim()
+$diskHealthActualTuiHash = (Get-FileHash -LiteralPath $diskHealthTuiBlueprintPath -Algorithm SHA256).Hash
+if ($diskHealthActualTuiHash -ne $diskHealthExpectedTuiHash) {
+    throw "⚠️⚠️⚠️ TUI DRIFT: Expected=$diskHealthExpectedTuiHash Actual=$diskHealthActualTuiHash"
+}
+Invoke-Expression (Get-Content -Raw -LiteralPath $diskHealthTuiBlueprintPath)
 
 function Get-DiskHealthLocalStateRoot {
     param(
@@ -205,10 +218,93 @@ function Get-MenuDisplayText {
     return $Text.Substring(0, $maximumLength - 3) + '...'
 }
 
+function Show-DiskHealthChoiceMenu {
+    param(
+        [Parameter(Mandatory)][string]$Title,
+        [AllowEmptyString()][string]$Subtitle = '',
+        [Parameter(Mandatory)][object[]]$Options,
+        [int]$DefaultIndex = 0,
+        [AllowNull()]$EscapeValue = $null,
+        [ValidateSet('Back', 'Exit')][string]$EscapeMode = 'Back',
+        [Parameter(DontShow)][AllowNull()][scriptblock]$ReadKey
+    )
+
+    if ($Options.Count -eq 0) { return $EscapeValue }
+    $selectedIndex = [Math]::Max(0, [Math]::Min($DefaultIndex, $Options.Count - 1))
+    Initialize-TuiHost
+    try {
+        while ($true) {
+            Lock-ViewportToWindow
+            try {
+                $width = Get-UiWidth
+                $height = $Host.UI.RawUI.WindowSize.Height
+            }
+            catch {
+                $width = 78
+                $height = 30
+            }
+
+            # Keep the last physical terminal row untouched. Writing there can
+            # scroll the viewport even when the logical frame otherwise fits.
+            $visibleBudget = [Math]::Max(1, $height - 11)
+            $viewTop = [Math]::Max(0, [Math]::Min($selectedIndex - [int]($visibleBudget / 2), [Math]::Max(0, $Options.Count - $visibleBudget)))
+            $viewBottom = [Math]::Min($Options.Count - 1, $viewTop + $visibleBudget - 1)
+            $labelWidth = [Math]::Max(1, $width - 8)
+
+            $frame = New-UiFrame
+            Add-UiFrameBanner -Frame $frame -Title $Title -Subtitle $Subtitle -Width $width
+            $aboveText = if ($viewTop -gt 0) { "  $(Get-UiGlyph -Name Up) $viewTop more above" } else { '' }
+            Add-UiFrameLine -Frame $frame -Text "$($_C.Dim)$aboveText$($_C.Reset)$($_C.EraseLn)"
+            for ($index = $viewTop; $index -le $viewBottom; $index++) {
+                $label = "[$($index + 1)] $([string]$Options[$index].Label)"
+                if ($label.Length -gt $labelWidth) {
+                    $label = if ($labelWidth -le 1) { $label.Substring(0, 1) } else { $label.Substring(0, $labelWidth - 1) + (Get-UiGlyph -Name Ellipsis) }
+                }
+                $optionColor = if ($Options[$index].PSObject.Properties['Color']) { [string]$Options[$index].Color } else { $_C.White }
+                if ($index -eq $selectedIndex) {
+                    Add-UiFrameLine -Frame $frame -Text "$($_C.SelBg)$($_C.SelFg)$($_C.Bold)  $(Get-UiGlyph -Name SelectionArrow) $label $($_C.Reset)$($_C.EraseLn)"
+                }
+                else {
+                    Add-UiFrameLine -Frame $frame -Text "    $optionColor$label$($_C.Reset)$($_C.EraseLn)"
+                }
+            }
+            $belowCount = [Math]::Max(0, $Options.Count - 1 - $viewBottom)
+            $belowText = if ($belowCount -gt 0) { "  $(Get-UiGlyph -Name Down) $belowCount more below" } else { '' }
+            Add-UiFrameLine -Frame $frame -Text "$($_C.Dim)$belowText$($_C.Reset)$($_C.EraseLn)"
+            Add-UiFrameLine -Frame $frame
+            Add-UiFrameNavFooter -Frame $frame -Mode $EscapeMode -Width $width
+            Write-UiFrame -Frame $frame
+
+            $key = if ($null -ne $ReadKey) { & $ReadKey } else { Read-ConsoleKey }
+            $keyName = [string]$key.Key
+            $keyCharacter = [char]0
+            if ($key.PSObject.Properties['KeyChar']) { $keyCharacter = [char]$key.KeyChar }
+            switch ($keyName) {
+                'UpArrow'    { $selectedIndex = if ($selectedIndex -eq 0) { $Options.Count - 1 } else { $selectedIndex - 1 } }
+                'DownArrow'  { $selectedIndex = if ($selectedIndex -eq ($Options.Count - 1)) { 0 } else { $selectedIndex + 1 } }
+                'PageUp'     { $selectedIndex = [Math]::Max(0, $selectedIndex - $visibleBudget) }
+                'PageDown'   { $selectedIndex = [Math]::Min($Options.Count - 1, $selectedIndex + $visibleBudget) }
+                'Home'       { $selectedIndex = 0 }
+                'End'        { $selectedIndex = $Options.Count - 1 }
+                'Escape'     { return $EscapeValue }
+                'Enter'      { return $Options[$selectedIndex] }
+                'ResizeEvent' { continue }
+            }
+            if ($keyCharacter -match '^[1-9]$') {
+                $shortcutIndex = [int][string]$keyCharacter - 1
+                if ($shortcutIndex -lt $Options.Count) { return $Options[$shortcutIndex] }
+            }
+        }
+    }
+    finally {
+        Restore-TuiHost
+    }
+}
+
 function Show-SmartctlInstallMenu {
     param(
         [Parameter(DontShow)]
-        [scriptblock]$ReadKey = { [Console]::ReadKey($true) }
+        [AllowNull()][scriptblock]$ReadKey
     )
 
     $options = @(
@@ -221,53 +317,14 @@ function Show-SmartctlInstallMenu {
             Label  = 'Continue with limited WMI/CIM diagnostics'
         }
     )
-    $selectedIndex = 0
-    $firstRender = $true
-    $menuHeight = $options.Count + 3
-
-    try {
-        try { [Console]::CursorVisible = $false } catch {}
-        while ($true) {
-            if (-not $firstRender) {
-                try {
-                    $position = $Host.UI.RawUI.CursorPosition
-                    $position.Y = [Math]::Max(0, $position.Y - $menuHeight)
-                    $position.X = 0
-                    $Host.UI.RawUI.CursorPosition = $position
-                } catch {}
-            }
-            $firstRender = $false
-
-            Write-Host '### 🔵 Το smartctl δεν βρέθηκε. Επιλέξτε ενέργεια:' -ForegroundColor Cyan
-            for ($index = 0; $index -lt $options.Count; $index++) {
-                $label = Get-MenuDisplayText -Text "[$($index + 1)] $($options[$index].Label)"
-                if ($index -eq $selectedIndex) {
-                    Write-Host '  ➔ [ ' -NoNewline -ForegroundColor Yellow
-                    Write-Host $label -NoNewline -ForegroundColor White
-                    Write-Host ' ]' -ForegroundColor Yellow
-                } else {
-                    Write-Host "     $label" -ForegroundColor Gray
-                }
-            }
-            Write-Host '  ↑/↓ Navigation  Enter Select  1-2 Shortcut' -ForegroundColor DarkGray
-            Write-Host '  ESC Back' -ForegroundColor Red
-
-            $key = & $ReadKey
-            if ($key.Key -eq 'UpArrow') {
-                $selectedIndex = if ($selectedIndex -eq 0) { $options.Count - 1 } else { $selectedIndex - 1 }
-            } elseif ($key.Key -eq 'DownArrow') {
-                $selectedIndex = if ($selectedIndex -eq $options.Count - 1) { 0 } else { $selectedIndex + 1 }
-            } elseif ($key.Key -eq 'Escape') {
-                return 'Back'
-            } elseif ($key.Key -eq 'Enter') {
-                return $options[$selectedIndex].Action
-            } elseif ($key.KeyChar -match '^[1-2]$') {
-                return $options[[int][string]$key.KeyChar - 1].Action
-            }
-        }
-    } finally {
-        try { [Console]::CursorVisible = $true } catch {}
-    }
+    $choice = Show-DiskHealthChoiceMenu `
+        -Title 'DiskHealth dependency' `
+        -Subtitle 'Το smartctl δεν βρέθηκε. Επιλέξτε ενέργεια.' `
+        -Options $options `
+        -EscapeValue ([pscustomobject]@{ Action = 'Back'; Label = '' }) `
+        -EscapeMode Back `
+        -ReadKey $ReadKey
+    return $choice.Action
 }
 
 function Get-DiskHealthWinRMComputers {
@@ -351,6 +408,13 @@ function Select-WinRMDiscoveryTarget {
 
     $options = [System.Collections.Generic.List[object]]::new()
     foreach ($computer in @($Computers)) {
+        if (-not $computer.PSObject.Properties['Action']) {
+            $computer | Add-Member -NotePropertyName Action -NotePropertyValue 'Target'
+        }
+        $label = "$($computer.ComputerName)  $($computer.IPAddress)  [$($computer.Status)]"
+        $color = if ($computer.WinRMHttpOpen) { $_C.OK } else { $_C.Warn }
+        $computer | Add-Member -NotePropertyName Label -NotePropertyValue $label -Force
+        $computer | Add-Member -NotePropertyName Color -NotePropertyValue $color -Force
         $options.Add($computer)
     }
     if ($AllowScan) {
@@ -360,61 +424,17 @@ function Select-WinRMDiscoveryTarget {
             IPAddress     = ''
             WinRMHttpOpen = $false
             Status        = 'Discovery'
+            Label         = '🔎 Scan network for more PCs'
+            Color         = $_C.H1
         })
     }
-
-    $firstRender = $true
-    $menuHeight = $options.Count + 3
-    try {
-        try { [Console]::CursorVisible = $false } catch {}
-        while ($true) {
-            if (-not $firstRender) {
-                try {
-                    $position = $Host.UI.RawUI.CursorPosition
-                    $position.Y = [Math]::Max(0, $position.Y - $menuHeight)
-                    $position.X = 0
-                    $Host.UI.RawUI.CursorPosition = $position
-                } catch {}
-            }
-            $firstRender = $false
-
-            Write-Host '### 🔵 Επιλέξτε WinRM υπολογιστή:' -ForegroundColor Cyan
-            for ($index = 0; $index -lt $options.Count; $index++) {
-                $computer = $options[$index]
-                $label = if ($computer.Action -eq 'Scan') {
-                    Get-MenuDisplayText -Text "[$($index + 1)] 🔎 $($computer.ComputerName)"
-                } else {
-                    Get-MenuDisplayText -Text "[$($index + 1)] $($computer.ComputerName)  $($computer.IPAddress)  [$($computer.Status)]"
-                }
-                if ($index -eq $selectedIndex) {
-                    $statusColor = if ($computer.Action -eq 'Scan') { $Cyan } elseif ($computer.WinRMHttpOpen) { $Green } else { $Yellow }
-                    Write-Host '  ➔ [ ' -NoNewline -ForegroundColor Yellow
-                    Write-Host $label -NoNewline -ForegroundColor $statusColor
-                    Write-Host ' ]' -ForegroundColor Yellow
-                } else {
-                    Write-Host "     $label" -ForegroundColor Gray
-                }
-            }
-            Write-Host '  ↑/↓ Navigation  Enter Select  1-9 Shortcut' -ForegroundColor DarkGray
-            Write-Host '  ESC Back' -ForegroundColor Red
-
-            $key = [Console]::ReadKey($true)
-            if ($key.Key -eq 'UpArrow') {
-                $selectedIndex = if ($selectedIndex -eq 0) { $options.Count - 1 } else { $selectedIndex - 1 }
-            } elseif ($key.Key -eq 'DownArrow') {
-                $selectedIndex = if ($selectedIndex -eq $options.Count - 1) { 0 } else { $selectedIndex + 1 }
-            } elseif ($key.Key -eq 'Escape') {
-                return $null
-            } elseif ($key.Key -eq 'Enter') {
-                return $options[$selectedIndex]
-            } elseif ($key.KeyChar -match '^[1-9]$') {
-                $numberIndex = [int][string]$key.KeyChar - 1
-                if ($numberIndex -lt $options.Count) { return $options[$numberIndex] }
-            }
-        }
-    } finally {
-        try { [Console]::CursorVisible = $true } catch {}
-    }
+    return Show-DiskHealthChoiceMenu `
+        -Title 'DiskHealth network targets' `
+        -Subtitle 'Επιλέξτε WinRM υπολογιστή.' `
+        -Options @($options) `
+        -DefaultIndex $selectedIndex `
+        -EscapeValue $null `
+        -EscapeMode Back
 }
 
 function Invoke-DiscoveredWinRMTarget {
@@ -491,59 +511,13 @@ function Show-StartupTargetMenu {
         [PSCustomObject]@{ Action = 'Local'; Label = '💻 Local computer' },
         [PSCustomObject]@{ Action = 'Network'; Label = '🌐 Network computer (WinRM)' }
     )
-    $selectedIndex = 0
-    $firstRender = $true
-    $menuHeight = $options.Count + 8
-
-    Clear-Host
-    try {
-        try { [Console]::CursorVisible = $false } catch {}
-        while ($true) {
-            if (-not $firstRender) {
-                try {
-                    $position = $Host.UI.RawUI.CursorPosition
-                    $position.Y = [Math]::Max(0, $position.Y - $menuHeight)
-                    $position.X = 0
-                    $Host.UI.RawUI.CursorPosition = $position
-                } catch {}
-            }
-            $firstRender = $false
-
-            Write-Host '======================================================================' -ForegroundColor Cyan
-            Write-Host '  💾 DISKHEALTH' -ForegroundColor Cyan
-            Write-Host '======================================================================' -ForegroundColor Cyan
-            Write-Host '  Επιλέξτε πηγή δίσκων:' -ForegroundColor White
-            Write-Host
-            for ($index = 0; $index -lt $options.Count; $index++) {
-                $label = Get-MenuDisplayText -Text "[$($index + 1)] $($options[$index].Label)"
-                if ($index -eq $selectedIndex) {
-                    Write-Host '  ➔ [ ' -NoNewline -ForegroundColor Yellow
-                    Write-Host $label -NoNewline -ForegroundColor White
-                    Write-Host ' ]' -ForegroundColor Yellow
-                } else {
-                    Write-Host "     $label" -ForegroundColor Gray
-                }
-            }
-            Write-Host
-            Write-Host '  ↑/↓ Navigation  Enter Select  1-2 Shortcut' -ForegroundColor DarkGray
-            Write-Host '  ESC Exit' -ForegroundColor Red
-
-            $key = [Console]::ReadKey($true)
-            if ($key.Key -eq 'UpArrow') {
-                $selectedIndex = if ($selectedIndex -eq 0) { $options.Count - 1 } else { $selectedIndex - 1 }
-            } elseif ($key.Key -eq 'DownArrow') {
-                $selectedIndex = if ($selectedIndex -eq $options.Count - 1) { 0 } else { $selectedIndex + 1 }
-            } elseif ($key.Key -eq 'Escape') {
-                return 'Exit'
-            } elseif ($key.Key -eq 'Enter') {
-                return $options[$selectedIndex].Action
-            } elseif ($key.KeyChar -match '^[1-2]$') {
-                return $options[[int][string]$key.KeyChar - 1].Action
-            }
-        }
-    } finally {
-        try { [Console]::CursorVisible = $true } catch {}
-    }
+    $choice = Show-DiskHealthChoiceMenu `
+        -Title '💾 DISKHEALTH' `
+        -Subtitle 'Επιλέξτε πηγή δίσκων.' `
+        -Options $options `
+        -EscapeValue ([pscustomobject]@{ Action = 'Exit'; Label = '' }) `
+        -EscapeMode Exit
+    return $choice.Action
 }
 
 if ($script:IsHomeLauncher) {
@@ -920,6 +894,324 @@ function Get-SmartTableLegendRows {
     }
 
     return @($rows)
+}
+
+function Get-DiskHealthReportColorPriority {
+    param([AllowEmptyString()][string]$Color)
+
+    switch ($Color) {
+        'Red'      { return 60 }
+        'Yellow'   { return 50 }
+        'Green'    { return 40 }
+        'Cyan'     { return 30 }
+        'White'    { return 20 }
+        'Gray'     { return 10 }
+        'DarkGray' { return 10 }
+        default    { return 0 }
+    }
+}
+
+function ConvertTo-DiskHealthReportRows {
+    param([AllowNull()][object[]]$Records)
+
+    $rows = [System.Collections.Generic.List[object]]::new()
+    $currentText = [System.Text.StringBuilder]::new()
+    $currentColor = 'DarkGray'
+
+    foreach ($record in @($Records)) {
+        $message = ''
+        $noNewLine = $false
+        $foregroundColor = 'DarkGray'
+
+        if ($record -is [System.Management.Automation.InformationRecord] -and $null -ne $record.MessageData) {
+            $messageData = $record.MessageData
+            $message = [string]$messageData.Message
+            $noNewLine = [bool]$messageData.NoNewLine
+            if ($null -ne $messageData.ForegroundColor) {
+                $foregroundColor = [string]$messageData.ForegroundColor
+            }
+        }
+        else {
+            $message = [string]$record
+        }
+
+        if ((Get-DiskHealthReportColorPriority -Color $foregroundColor) -gt (Get-DiskHealthReportColorPriority -Color $currentColor)) {
+            $currentColor = $foregroundColor
+        }
+
+        $parts = [regex]::Split($message, "\r\n|\n|\r")
+        for ($partIndex = 0; $partIndex -lt $parts.Count; $partIndex++) {
+            if ($partIndex -gt 0) {
+                $rows.Add([pscustomobject]@{ Text = $currentText.ToString(); Color = $currentColor })
+                $null = $currentText.Clear()
+                $currentColor = $foregroundColor
+            }
+            $null = $currentText.Append($parts[$partIndex])
+        }
+
+        if (-not $noNewLine) {
+            $rows.Add([pscustomobject]@{ Text = $currentText.ToString(); Color = $currentColor })
+            $null = $currentText.Clear()
+            $currentColor = 'DarkGray'
+        }
+    }
+
+    if ($currentText.Length -gt 0) {
+        $rows.Add([pscustomobject]@{ Text = $currentText.ToString(); Color = $currentColor })
+    }
+
+    while ($rows.Count -gt 0 -and [string]::IsNullOrWhiteSpace([string]$rows[$rows.Count - 1].Text)) {
+        $rows.RemoveAt($rows.Count - 1)
+    }
+    return @($rows)
+}
+
+function Split-DiskHealthReportText {
+    param(
+        [AllowEmptyString()][string]$Text,
+        [int]$Width
+    )
+
+    $Width = [Math]::Max(1, $Width)
+    if ([string]::IsNullOrEmpty($Text)) { return @('') }
+    if ($Text.Length -le $Width) { return @($Text) }
+
+    $leading = [regex]::Match($Text, '^\s*').Value
+    if ($leading.Length -ge $Width) { $leading = '' }
+    $words = @($Text.Trim() -split '\s+')
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $line = $leading
+
+    foreach ($originalWord in $words) {
+        $word = $originalWord
+        while ($word.Length -gt [Math]::Max(1, $Width - $leading.Length)) {
+            if ($line.Length -gt $leading.Length) {
+                $lines.Add($line)
+                $line = $leading
+            }
+            $chunkWidth = [Math]::Max(1, $Width - $leading.Length)
+            $lines.Add($leading + $word.Substring(0, $chunkWidth))
+            $word = $word.Substring($chunkWidth)
+        }
+
+        $separator = if ($line.Length -gt $leading.Length) { ' ' } else { '' }
+        if (($line.Length + $separator.Length + $word.Length) -gt $Width) {
+            $lines.Add($line)
+            $line = $leading + $word
+        }
+        else {
+            $line += $separator + $word
+        }
+    }
+
+    if ($line.Length -gt 0) { $lines.Add($line) }
+    return @($lines)
+}
+
+function ConvertTo-DiskHealthCompactTableLines {
+    param(
+        [AllowEmptyString()][string]$Text,
+        [int]$Width
+    )
+
+    $trimmed = $Text.Trim()
+    if ($trimmed -match '^\+[+\-]+\+$') { return @() }
+    if (-not ($trimmed.StartsWith('|') -and $trimmed.EndsWith('|'))) {
+        return @(Split-DiskHealthReportText -Text $Text -Width $Width)
+    }
+
+    $cells = @($trimmed.Trim('|').Split('|') | ForEach-Object { $_.Trim() })
+    if ($cells.Count -eq 6) {
+        if ($cells[0] -eq 'ID') {
+            return @(Split-DiskHealthReportText -Text 'SMART attributes (compact view): ID, attribute, score/current, worst, failure floor/threshold and raw/value.' -Width $Width)
+        }
+        $result = [System.Collections.Generic.List[string]]::new()
+        foreach ($line in @(Split-DiskHealthReportText -Text "$($cells[0])  $($cells[1])" -Width $Width)) { $result.Add($line) }
+        foreach ($line in @(Split-DiskHealthReportText -Text "  Score/Current $($cells[2]) | Worst $($cells[3]) | Floor/Threshold $($cells[4])" -Width $Width)) { $result.Add($line) }
+        foreach ($line in @(Split-DiskHealthReportText -Text "  Raw/Value: $($cells[5])" -Width $Width)) { $result.Add($line) }
+        return @($result)
+    }
+    if ($cells.Count -eq 2) {
+        return @(Split-DiskHealthReportText -Text "$($cells[0]): $($cells[1])" -Width $Width)
+    }
+    return @(Split-DiskHealthReportText -Text ($cells -join ' · ') -Width $Width)
+}
+
+function Get-DiskHealthReportAnsiColor {
+    param([AllowEmptyString()][string]$Color)
+
+    switch ($Color) {
+        'Red'      { return $_C.Fail }
+        'Yellow'   { return $_C.Warn }
+        'Green'    { return $_C.OK }
+        'Cyan'     { return $_C.H1 }
+        'White'    { return $_C.White }
+        default    { return $_C.Dim }
+    }
+}
+
+function Get-DiskHealthReportDisplayLines {
+    param(
+        [Parameter(Mandatory)][object[]]$Rows,
+        [int]$Width
+    )
+
+    $Width = [Math]::Max(1, $Width)
+    $displayLines = [System.Collections.Generic.List[object]]::new()
+    foreach ($row in $Rows) {
+        $plainText = [string]$row.Text
+        $trimmedStart = $plainText.TrimStart()
+        $wrapped = if ($Width -lt 104 -and ($trimmedStart.StartsWith('+') -or $trimmedStart.StartsWith('|'))) {
+            @(ConvertTo-DiskHealthCompactTableLines -Text $plainText -Width $Width)
+        }
+        else {
+            @(Split-DiskHealthReportText -Text $plainText -Width $Width)
+        }
+
+        $ansiColor = Get-DiskHealthReportAnsiColor -Color ([string]$row.Color)
+        foreach ($line in $wrapped) {
+            $displayLines.Add([pscustomobject]@{
+                    PlainText = [string]$line
+                    Text      = "$ansiColor$line$($_C.Reset)$($_C.EraseLn)"
+                })
+        }
+    }
+    return @($displayLines)
+}
+
+function New-DiskHealthReportFrame {
+    param(
+        [Parameter(Mandatory)][object[]]$Rows,
+        [int]$Width,
+        [int]$WindowHeight,
+        [int]$ScrollOffset = 0,
+        [AllowEmptyString()][string]$Target = '',
+        [AllowEmptyString()][string]$StateMarker = ''
+    )
+
+    $Width = [Math]::Max(1, $Width)
+    $WindowHeight = [Math]::Max(12, $WindowHeight)
+    $contentWidth = [Math]::Max(1, $Width - 2)
+    $displayLines = @(Get-DiskHealthReportDisplayLines -Rows $Rows -Width $contentWidth)
+    # Leave one physical row unused; writing into the bottom-right cell can force
+    # Windows Terminal to scroll even when every individual line fits the width.
+    $visibleBudget = [Math]::Max(1, $WindowHeight - 11)
+    $maximumOffset = [Math]::Max(0, $displayLines.Count - $visibleBudget)
+    $ScrollOffset = [Math]::Max(0, [Math]::Min($ScrollOffset, $maximumOffset))
+    $visibleEnd = [Math]::Min($displayLines.Count - 1, $ScrollOffset + $visibleBudget - 1)
+
+    $subtitleParts = [System.Collections.Generic.List[string]]::new()
+    if (-not [string]::IsNullOrWhiteSpace($Target)) { $subtitleParts.Add("Target: $Target") }
+    $subtitleParts.Add("$($displayLines.Count) report lines")
+    if (-not [string]::IsNullOrWhiteSpace($StateMarker)) { $subtitleParts.Add($StateMarker) }
+
+    $frame = New-UiFrame
+    Add-UiFrameBanner -Frame $frame -Title 'DiskHealth Diagnostic Report' -Subtitle ($subtitleParts -join ' | ') -Width $Width
+    $aboveText = if ($ScrollOffset -gt 0) { "  $(Get-UiGlyph -Name Up) $ScrollOffset more above" } else { '' }
+    Add-UiFrameLine -Frame $frame -Text "$($_C.Dim)$aboveText$($_C.Reset)$($_C.EraseLn)"
+
+    if ($displayLines.Count -eq 0) {
+        Add-UiFrameLine -Frame $frame -Text "$($_C.Warn)  No diagnostic report rows were generated.$($_C.Reset)$($_C.EraseLn)"
+    }
+    elseif ($visibleEnd -ge $ScrollOffset) {
+        for ($index = $ScrollOffset; $index -le $visibleEnd; $index++) {
+            Add-UiFrameLine -Frame $frame -Text $displayLines[$index].Text
+        }
+    }
+
+    $belowCount = [Math]::Max(0, $displayLines.Count - 1 - $visibleEnd)
+    $belowText = if ($belowCount -gt 0) { "  $(Get-UiGlyph -Name Down) $belowCount more below" } else { '' }
+    Add-UiFrameLine -Frame $frame -Text "$($_C.Dim)$belowText$($_C.Reset)$($_C.EraseLn)"
+    Add-UiFrameLine -Frame $frame
+    Add-UiFrameShortcutSegments -Frame $frame -Segments @(
+        (New-UiShortcutSegment -Text 'Up/Down' -Color $_C.White)
+        (New-UiShortcutSegment -Text ' scroll   ' -Color $_C.Dim)
+        (New-UiShortcutSegment -Text 'PgUp/PgDn' -Color $_C.White)
+        (New-UiShortcutSegment -Text ' page   ' -Color $_C.Dim)
+        (New-UiShortcutSegment -Text 'Home/End' -Color $_C.White)
+        (New-UiShortcutSegment -Text ' jump   ' -Color $_C.Dim)
+        (New-UiShortcutSegment -Text 'Esc' -Color $_C.Fail)
+        (New-UiShortcutSegment -Text ' back' -Color $_C.Dim)
+    ) -Width $Width
+
+    return [pscustomobject]@{
+        Frame         = $frame
+        DisplayLines  = $displayLines
+        ScrollOffset  = $ScrollOffset
+        MaximumOffset = $maximumOffset
+        VisibleBudget = $visibleBudget
+    }
+}
+
+function Get-DiskHealthReportFramePayload {
+    param(
+        [Parameter(Mandatory)][System.Text.StringBuilder]$Frame,
+        [switch]$ForceClear
+    )
+
+    $escape = [string][char]27
+    $prefix = if ($ForceClear) { Get-TuiForceClearSequence } else { "$escape[H" }
+    return "$escape[?2026h$prefix$($Frame.ToString())$escape[J$escape[?2026l"
+}
+
+function Show-DiskHealthReport {
+    param(
+        [Parameter(Mandatory)][object[]]$Rows,
+        [AllowEmptyString()][string]$Target = ''
+    )
+
+    $scrollOffset = 0
+    Initialize-TuiHost
+    try {
+        while ($true) {
+            Lock-ViewportToWindow
+            try {
+                $width = Get-UiWidth
+                $height = $Host.UI.RawUI.WindowSize.Height
+            }
+            catch {
+                $width = 78
+                $height = 30
+            }
+
+            $view = New-DiskHealthReportFrame -Rows $Rows -Width $width -WindowHeight $height -ScrollOffset $scrollOffset -Target $Target
+            $scrollOffset = $view.ScrollOffset
+            [Console]::Write((Get-DiskHealthReportFramePayload -Frame $view.Frame -ForceClear:$script:RequestForceClear))
+            $script:RequestForceClear = $false
+
+            $key = Read-ConsoleKey
+            switch ($key.Key) {
+                'UpArrow'    { $scrollOffset = [Math]::Max(0, $scrollOffset - 1) }
+                'DownArrow'  { $scrollOffset = [Math]::Min($view.MaximumOffset, $scrollOffset + 1) }
+                'PageUp'     { $scrollOffset = [Math]::Max(0, $scrollOffset - $view.VisibleBudget) }
+                'PageDown'   { $scrollOffset = [Math]::Min($view.MaximumOffset, $scrollOffset + $view.VisibleBudget) }
+                'Home'       { $scrollOffset = 0 }
+                'End'        { $scrollOffset = $view.MaximumOffset }
+                'Escape'     { return }
+                'Enter'      { return }
+                'ResizeEvent' { continue }
+            }
+        }
+    }
+    finally {
+        Restore-TuiHost
+    }
+}
+
+function Write-DiskHealthCapturedOutput {
+    param([AllowNull()][object[]]$Records)
+
+    foreach ($record in @($Records)) {
+        if ($record -is [System.Management.Automation.InformationRecord] -and $null -ne $record.MessageData) {
+            $messageData = $record.MessageData
+            $parameters = @{ Object = [string]$messageData.Message; NoNewline = [bool]$messageData.NoNewLine }
+            if ($null -ne $messageData.ForegroundColor) { $parameters.ForegroundColor = [ConsoleColor]$messageData.ForegroundColor }
+            Microsoft.PowerShell.Utility\Write-Host @parameters
+        }
+        else {
+            Microsoft.PowerShell.Utility\Write-Host ([string]$record)
+        }
+    }
 }
 
 # Επιλογή ATA telemetry profile από model/firmware και, κυρίως, από το πραγματικό
@@ -2164,68 +2456,13 @@ function Show-DriveMenu {
             $options.Add([PSCustomObject]@{ Action = 'All'; DriveIndex = -1; Label = 'Διάγνωση όλων των δίσκων (All Drives)' })
         }
 
-        # Hide cursor
-        try { [Console]::CursorVisible = $false } catch {}
-
-        $firstRun = $true
-        # Header + options + navigation footer + ESC footer.
-        $menuHeight = $options.Count + 3
-
-        while ($true) {
-            if (-not $firstRun) {
-                try {
-                    $pos = $Host.UI.RawUI.CursorPosition
-                    $pos.Y = [Math]::Max(0, $pos.Y - $menuHeight)
-                    $pos.X = 0
-                    $Host.UI.RawUI.CursorPosition = $pos
-                } catch {}
-            } else {
-                $firstRun = $false
-            }
-
-            Write-Host "### 🔵 Ανιχνεύθηκαν $($Drives.Count) φυσικοί δίσκοι. Επιλέξτε δίσκο για διάγνωση:" -ForegroundColor $Cyan
-            for ($i = 0; $i -lt $options.Count; $i++) {
-                $optionLabel = Get-MenuDisplayText -Text "[$($i + 1)] $($options[$i].Label)"
-                if ($i -eq $selectedIndex) {
-                    Write-Host "  ➔ [ " -NoNewline -ForegroundColor $Yellow
-                    Write-Host $optionLabel -NoNewline -ForegroundColor $Cyan
-                    Write-Host " ]" -ForegroundColor $Yellow
-                } else {
-                    Write-Host "     $optionLabel" -ForegroundColor $Gray
-                }
-            }
-            Write-Host '  ↑/↓ Navigation  Enter Select  1-9 Shortcut' -ForegroundColor $Gray
-            Write-Host $(if ($AllowBack) { '  ESC Back' } else { '  ESC Exit' }) -ForegroundColor $Red
-
-            $key = [Console]::ReadKey($true)
-            if ($key.Key -eq "UpArrow") {
-                $selectedIndex = if ($selectedIndex -eq 0) { $options.Count - 1 } else { $selectedIndex - 1 }
-            }
-            elseif ($key.Key -eq "DownArrow") {
-                $selectedIndex = if ($selectedIndex -eq $options.Count - 1) { 0 } else { $selectedIndex + 1 }
-            }
-            elseif ($key.Key -eq "Escape") {
-                return [PSCustomObject]@{
-                    Action     = $(if ($AllowBack) { 'Back' } else { 'Exit' })
-                    DriveIndex = -1
-                    Label      = ''
-                }
-            }
-            elseif ($key.Key -eq "Enter") {
-                break
-            }
-            elseif ($key.KeyChar -match '^[1-9]$') {
-                $numberIndex = [int][string]$key.KeyChar - 1
-                if ($numberIndex -lt $options.Count) {
-                    $selectedIndex = $numberIndex
-                    break
-                }
-            }
-        }
-
-        try { [Console]::CursorVisible = $true } catch {}
-        Write-Host ""
-        return $options[$selectedIndex]
+        $escapeAction = if ($AllowBack) { 'Back' } else { 'Exit' }
+        return Show-DiskHealthChoiceMenu `
+            -Title 'DiskHealth disks' `
+            -Subtitle "Ανιχνεύθηκαν $($Drives.Count) φυσικοί δίσκοι. Επιλέξτε δίσκο για διάγνωση." `
+            -Options @($options) `
+            -EscapeValue ([pscustomobject]@{ Action = $escapeAction; DriveIndex = -1; Label = '' }) `
+            -EscapeMode $(if ($AllowBack) { 'Back' } else { 'Exit' })
     } catch {
         # Fallback αν αποτύχει το console interaction
         if ($Drives.Count -gt 1) {
@@ -2273,7 +2510,10 @@ while ($runLoop) {
         $runLoop = $false
     }
 
-    # 3. Ανάλυση και Παρουσίαση για κάθε δίσκο
+    # 3. Ανάλυση και Παρουσίαση για κάθε δίσκο. Capture Write-Host's structured
+    # information records so the same diagnostic logic can feed a resize-safe TUI.
+    $reportRecords = @(
+    & {
     foreach ($disk in $selectedDrives) {
     $isDiskNVMe = ($disk.BusType -eq "NVMe" -or $disk.InterfaceType -like "*NVM*" -or $disk.InterfaceType -like "*Express*")
 
@@ -3141,9 +3381,14 @@ while ($runLoop) {
         }
     }
     }
+    } 6>&1
+    )
 
     if ($menuEnabled -and $runLoop) {
-        Write-Host "  Press any key to return to the selection menu..." -ForegroundColor $Yellow
-        [Console]::ReadKey($true) | Out-Null
+        $reportRows = @(ConvertTo-DiskHealthReportRows -Records $reportRecords)
+        Show-DiskHealthReport -Rows $reportRows -Target $ComputerName
+    }
+    else {
+        Write-DiskHealthCapturedOutput -Records $reportRecords
     }
 }

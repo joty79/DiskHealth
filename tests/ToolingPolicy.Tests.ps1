@@ -26,7 +26,7 @@ foreach ($requiredInteractiveMarker in @(
     'function Show-SmartctlInstallMenu'
     "Action = 'Install'"
     "Action = 'Continue'"
-    "return 'Back'"
+    "Action = 'Back'"
     '$installSmartctlNow = [bool]$InstallSmartctl'
     '$canPromptForInstall'
     '-not $NoUI'
@@ -63,7 +63,14 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile(
 if ($parseErrors.Count -gt 0) {
     throw "Production script has parser errors: $($parseErrors -join '; ')"
 }
-foreach ($functionName in @('Get-MenuDisplayText', 'Show-SmartctlInstallMenu', 'Get-WingetSmartctlInstallArguments')) {
+$blueprintPath = Join-Path $repoRoot 'PS_UI_Blueprint.psm1'
+$receiptPath = Join-Path $repoRoot 'PS_UI_Blueprint.sha256'
+$expectedHash = (Get-Content -Raw -LiteralPath $receiptPath).Trim()
+$actualHash = (Get-FileHash -LiteralPath $blueprintPath -Algorithm SHA256).Hash
+if ($actualHash -ne $expectedHash) { throw "DiskHealth TUI blueprint drift: $actualHash" }
+Invoke-Expression (Get-Content -Raw -LiteralPath $blueprintPath)
+
+foreach ($functionName in @('Get-MenuDisplayText', 'Show-DiskHealthChoiceMenu', 'Show-SmartctlInstallMenu', 'Get-WingetSmartctlInstallArguments')) {
     $functionAst = $ast.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -103,15 +110,22 @@ foreach ($requiredArgument in @('install', '--id', 'smartmontools.smartmontools'
 $installKey = [ConsoleKeyInfo]::new('1', [ConsoleKey]::D1, $false, $false, $false)
 $continueKey = [ConsoleKeyInfo]::new('2', [ConsoleKey]::D2, $false, $false, $false)
 $escapeKey = [ConsoleKeyInfo]::new([char]0, [ConsoleKey]::Escape, $false, $false, $false)
-$installDecision = Show-SmartctlInstallMenu -ReadKey { $installKey } 6>$null
+$originalConsoleOut = [Console]::Out
+[Console]::SetOut([System.IO.TextWriter]::Null)
+try {
+    $installDecision = Show-SmartctlInstallMenu -ReadKey { $installKey } 6>$null
+    $continueDecision = Show-SmartctlInstallMenu -ReadKey { $continueKey } 6>$null
+    $backDecision = Show-SmartctlInstallMenu -ReadKey { $escapeKey } 6>$null
+}
+finally {
+    [Console]::SetOut($originalConsoleOut)
+}
 if ($installDecision -ne 'Install') {
     throw 'Interactive smartctl option 1 did not return Install.'
 }
-$continueDecision = Show-SmartctlInstallMenu -ReadKey { $continueKey } 6>$null
 if ($continueDecision -ne 'Continue') {
     throw 'Interactive smartctl option 2 did not return Continue.'
 }
-$backDecision = Show-SmartctlInstallMenu -ReadKey { $escapeKey } 6>$null
 if ($backDecision -ne 'Back') {
     throw 'Interactive smartctl ESC did not return Back.'
 }

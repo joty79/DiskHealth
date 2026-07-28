@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.0] - 2026-07-28
+
+### Changed
+- Μεταφέρθηκαν τα main, disk, WinRM-target και smartctl-dependency menus στο pinned canonical `PS_UI_Blueprint.psm1`, με immediate-mode full redraw, synchronized single-write frames, live resize polling και ασφαλές viewport height budget.
+- Το diagnostic output συλλαμβάνει πλέον τα πραγματικά PowerShell `HostInformationMessage` records, μαζί με `NoNewline` και severity colors, ώστε η υπάρχουσα SMART λογική να τροφοδοτεί το TUI χωρίς δεύτερη υλοποίηση ή αλλαγή διαγνωστικών κανόνων.
+- Το diagnostic report έγινε scrollable με `Up/Down`, `PageUp/PageDown`, `Home/End` και επιστροφή με `ESC`/`Enter`. Σε στενό viewport οι fixed-width SMART tables αποδίδονται ως compact stacked rows.
+- Το `-NoUI`/automation path αναπαράγει το captured report ως κανονικό plain console output και δεν περιμένει keyboard input.
+- Το startup επαληθεύει το vendored TUI runtime με το committed `PS_UI_Blueprint.sha256`; drift ή missing asset σταματά με εμφανές error.
+
+### Fixed
+- Αφαιρέθηκε το static diagnostic screen (`Write-Host` + blocking `ReadKey`) που δεν μπορούσε να ξανασχεδιαστεί μετά από resize και δημιουργούσε broken borders, wraps και stale lines.
+- Αφαιρέθηκε το cursor-position subtraction από όλα τα DiskHealth selectors. Το `ESC` παραμένει Back σε child screens και Exit μόνο στο main menu.
+
+### Tests
+- Προστέθηκε DiskHealth-specific `pyte 0.8.2` sequential replay στα `120 -> 101 -> 100 -> 99 -> 98 -> 80 -> 60 -> 120`, με raw CRLF validation και assertions για zero wraps, zero scrolls, duplicate banners και stale frames.
+- Επιβεβαιώθηκε το report capture/`NoNewline` merge, το compact SMART table fallback, parser compatibility, PSScriptAnalyzer error severity, non-admin `-NoUI` fallback και elevated local NVMe end-to-end collection μέσω direct `gsudo.exe`.
+
 ## [1.23.10] - 2026-07-28
 
 ### Fixed
