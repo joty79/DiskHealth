@@ -756,14 +756,16 @@ function Get-SeagateNormalizedRateState {
     }
 
     if ($Threshold -le 0) {
-        return 'Neutral'
+        return 'NoThreshold'
     }
 
     if ($Current -le $Threshold) {
-        return 'Critical'
+        return 'ThresholdCrossed'
     }
 
-    return 'Normal'
+    # Above-threshold means only that this attribute has not triggered its
+    # firmware failure condition. It is not a vendor-independent health claim.
+    return 'AboveThreshold'
 }
 
 # Επιλογή ATA telemetry profile από model/firmware και, κυρίως, από το πραγματικό
@@ -2629,7 +2631,7 @@ while ($runLoop) {
         if ($isRotationalMedia) {
             Write-Host "  🔸 Οι μηχανικοί HDD δεν διαθέτουν τυποποιημένο wear/health percentage. Η αξιολόγηση βασίζεται στο SMART overall status, στα thresholds και στους κρίσιμους raw counters." -ForegroundColor $Gray
             if ($isSeagateHdd) {
-                Write-Host "  🔸 Seagate 01/07/C3: τα raw πεδία είναι proprietary vendor telemetry, όχι αυτόνομα totals κατεστραμμένων reads/seeks. Αξιολογούνται από Current έναντι Threshold και το SMART overall result." -ForegroundColor $Gray
+                Write-Host "  🔸 Seagate 01/07/C3: τα individual values είναι proprietary. Το Current πάνω από Threshold σημαίνει μόνο ότι δεν ενεργοποιήθηκε failure condition· δεν αποδεικνύει από μόνο του φυσιολογική κατάσταση." -ForegroundColor $Gray
             }
         } elseif ($null -eq $health) {
             Write-Host "  🔸 Το SMART overall status είναι επιτυχές, αλλά δεν υπάρχει αξιόπιστο vendor mapping για ποσοστό ζωής NAND." -ForegroundColor $Gray
@@ -2712,8 +2714,9 @@ while ($runLoop) {
         if ($brand -ne "NVMe") {
             $seagateRateState = Get-SeagateNormalizedRateState -AttributeId $attr.ID -Current $attr.Current -Threshold $attr.Threshold -IsSeagateHdd $isSeagateHdd
             if ($seagateRateState -ne 'NotApplicable') {
-                if ($seagateRateState -eq 'Critical') { $lineColor = $Red }
-                elseif ($seagateRateState -eq 'Normal') { $lineColor = $Green }
+                # Neutral unless the firmware threshold is actually crossed.
+                # Passing one proprietary attribute is not a green health claim.
+                if ($seagateRateState -eq 'ThresholdCrossed') { $lineColor = $Red }
                 else { $lineColor = $Gray }
             } elseif ($brand -eq 'SanDisk') {
                 $sanDiskErrorIds = @(0x05, 0xAA, 0xAB, 0xAC, 0xB8, 0xBB, 0xBC, 0xC4, 0xC5, 0xC6)

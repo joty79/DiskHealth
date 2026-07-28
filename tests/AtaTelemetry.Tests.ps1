@@ -61,10 +61,10 @@ Assert-Equal (Get-AtaPowerOnHoursValue -Attribute $seagateHoursFixture -SmartDat
 $plainHoursFixture = [PSCustomObject]@{ Raw = [uint64]9639; RawString = '9639' }
 Assert-Equal (Get-AtaPowerOnHoursValue -Attribute $plainHoursFixture -SmartData $null) 9639 'plain ATA power-on hours'
 
-Assert-Equal (Get-SeagateNormalizedRateState -AttributeId 0x01 -Current 80 -Threshold 6 -IsSeagateHdd $true) 'Normal' 'Seagate Raw Read Error Rate above threshold'
-Assert-Equal (Get-SeagateNormalizedRateState -AttributeId 0x07 -Current 72 -Threshold 45 -IsSeagateHdd $true) 'Normal' 'Seagate Seek Error Rate above threshold'
-Assert-Equal (Get-SeagateNormalizedRateState -AttributeId 0xC3 -Current 80 -Threshold 0 -IsSeagateHdd $true) 'Neutral' 'Seagate ECC counter without threshold'
-Assert-Equal (Get-SeagateNormalizedRateState -AttributeId 0x01 -Current 6 -Threshold 6 -IsSeagateHdd $true) 'Critical' 'Seagate normalized threshold crossing'
+Assert-Equal (Get-SeagateNormalizedRateState -AttributeId 0x01 -Current 80 -Threshold 6 -IsSeagateHdd $true) 'AboveThreshold' 'Seagate Raw Read Error Rate above threshold is not a health claim'
+Assert-Equal (Get-SeagateNormalizedRateState -AttributeId 0x07 -Current 72 -Threshold 45 -IsSeagateHdd $true) 'AboveThreshold' 'Seagate Seek Error Rate above threshold is not a health claim'
+Assert-Equal (Get-SeagateNormalizedRateState -AttributeId 0xC3 -Current 80 -Threshold 0 -IsSeagateHdd $true) 'NoThreshold' 'Seagate ECC counter without threshold'
+Assert-Equal (Get-SeagateNormalizedRateState -AttributeId 0x01 -Current 6 -Threshold 6 -IsSeagateHdd $true) 'ThresholdCrossed' 'Seagate normalized threshold crossing'
 Assert-Equal (Get-SeagateNormalizedRateState -AttributeId 0x01 -Current 80 -Threshold 6 -IsSeagateHdd $false) 'NotApplicable' 'Non-Seagate drive retains its profile rules'
 
 $productionText = Get-Content -LiteralPath $scriptPath -Raw
@@ -74,8 +74,11 @@ if (-not $productionText.Contains("if (`$null -eq `$health -and `$isRotationalMe
 if (-not $productionText.Contains('Οι μηχανικοί HDD δεν διαθέτουν τυποποιημένο wear/health percentage.')) {
     throw 'Missing HDD-specific health explanation.'
 }
-if (-not $productionText.Contains('Seagate 01/07/C3: τα raw πεδία είναι proprietary vendor telemetry')) {
+if (-not $productionText.Contains('Το Current πάνω από Threshold σημαίνει μόνο ότι δεν ενεργοποιήθηκε failure condition')) {
     throw 'Missing Seagate proprietary raw-counter explanation.'
+}
+if (-not $productionText.Contains("if (`$seagateRateState -eq 'ThresholdCrossed') { `$lineColor = `$Red }")) {
+    throw 'Seagate proprietary rate rows must remain neutral unless the firmware threshold is crossed.'
 }
 
 Write-Host 'PASS: ATA temperature, Seagate rate, and HDD presentation regression fixtures.' -ForegroundColor Green

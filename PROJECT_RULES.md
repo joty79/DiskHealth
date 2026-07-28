@@ -157,3 +157,11 @@
 - **Guardrail:** For recognized Seagate HDDs, evaluate `01/07/C3` only from normalized `Current` versus `Threshold`; never infer a failed-read/seek total from the raw field. Keep overall SMART and explicit reallocated/pending/uncorrectable counters as independent checks.
 - **Files affected:** `DiskHealth.ps1`, `tests\AtaTelemetry.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
 - **Validation:** All eight local regression/integration suites, Windows PowerShell 5.1 focused compatibility, PSScriptAnalyzer error review, and an elevated end-to-end WinRM run against `NEOS / 192.168.1.6` passed. Independent live smartctl evidence confirmed `SMART PASSED`, zero logged errors, and zero `05/BB/C5/C6/C7` counters; the disk has no recorded self-tests.
+
+### 2026-07-28 — Above threshold is not synonymous with healthy
+
+- **Problem:** The initial Seagate fix described `Current 80 > Threshold 6` and `Current 72 > Threshold 45` as “normal” and colored both rows green.
+- **Root cause:** A SMART failure-trigger comparison was accidentally promoted into a positive health interpretation, despite Seagate explicitly treating individual attributes and thresholds as proprietary.
+- **Guardrail:** `Current > Threshold` means only “this attribute has not triggered its firmware failure condition.” Keep proprietary Seagate `01/07/C3` rows neutral unless a threshold is crossed; never label an above-threshold individual attribute as healthy or normal without a vendor-supported interpretation.
+- **Files affected:** `DiskHealth.ps1`, `tests\AtaTelemetry.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
+- **Validation:** All eight regression/integration suites, the focused Windows PowerShell 5.1 fixture, parser validation, PSScriptAnalyzer error review, and `git diff --check` passed. The fixture asserts neutral `AboveThreshold`/`NoThreshold` states and red only for `ThresholdCrossed`.

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.7] - 2026-07-28
+
+### Fixed
+- Corrected the Seagate `01/07/C3` wording and coloring so `Current > Threshold` is no longer described or colored as “normal.” It now means only that the firmware failure condition has not been triggered.
+- Above-threshold and thresholdless proprietary Seagate attributes are neutral gray; an actual threshold crossing remains red.
+
+### Tests
+- Updated the Seagate fixtures to distinguish `AboveThreshold`, `NoThreshold`, and `ThresholdCrossed` without manufacturing a green health verdict.
+
 ## [1.23.6] - 2026-07-28
 
 ### Fixed
