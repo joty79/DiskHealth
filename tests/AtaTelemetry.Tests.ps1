@@ -12,7 +12,7 @@ if ($parseErrors) {
     throw "Production script has parser errors: $($parseErrors -join '; ')"
 }
 
-foreach ($functionName in @('Get-AtaTemperatureCelsius', 'Get-AtaSpinUpTimeDisplay', 'Get-AtaPowerOnHoursValue', 'Get-SeagateNormalizedRateState', 'Get-SeagateReadEccContext', 'Get-ConsoleSafeTextWidth', 'Get-WrappedConsoleLines')) {
+foreach ($functionName in @('Get-AtaTemperatureCelsius', 'Get-AtaSpinUpTimeDisplay', 'Get-AtaPowerOnHoursValue', 'Get-SeagateNormalizedRateState', 'Get-SeagateReadEccContext', 'Get-ConsoleSafeTextWidth', 'Get-WrappedConsoleLines', 'Get-SmartTableLegendRows')) {
     $functionAst = $ast.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
@@ -110,6 +110,14 @@ foreach ($longTokenLine in $longTokenLines) {
         throw "Long telemetry token exceeds compact terminal width: '$longTokenLine'"
     }
 }
+$legendRows = @(Get-SmartTableLegendRows -TextLines @(
+    'Score/Worst = vendor-normalized values; not errors or percentages.'
+    'Fail <= = firmware failure floor. Vendor Raw = opaque manufacturer telemetry.'
+))
+Assert-Equal $legendRows.Count 3 'SMART table merged legend row count'
+foreach ($legendRow in $legendRows) {
+    Assert-Equal $legendRow.Length 99 'SMART table merged legend width'
+}
 
 $productionText = Get-Content -LiteralPath $scriptPath -Raw
 if (-not $productionText.Contains("if (`$null -eq `$health -and `$isRotationalMedia) { 'SMART' }")) {
@@ -129,6 +137,12 @@ if (-not $productionText.Contains('| Score   | Worst   | Fail <=   | Vendor Raw'
 }
 if (-not $productionText.Contains('### 🔵 Seagate Read / ECC Context')) {
     throw 'Missing dedicated Seagate read/ECC context block.'
+}
+if (-not $productionText.Contains('Write-WrappedConsoleText -Text "Unresolved evidence:"')) {
+    throw 'Seagate unresolved evidence must use a deliberate grouped layout.'
+}
+if (-not $productionText.Contains('$legendRows = Get-SmartTableLegendRows')) {
+    throw 'ATA score legend must render as a merged boxed row.'
 }
 
 Write-Host 'PASS: ATA temperature, Seagate rate, and HDD presentation regression fixtures.' -ForegroundColor Green

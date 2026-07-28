@@ -187,7 +187,7 @@ For SATA drives, the script retrieves the raw 512-byte array from `MSStorageDriv
 
 For Seagate HDDs, the individual values of `0x01 Raw Read Error Rate`, `0x07 Seek Error Rate`, and `0xC3 Hardware ECC Recovered` are proprietary and must not be interpreted as vendor-independent health measurements or standalone totals of failed operations. `Current > Threshold` means only that the attribute has not triggered its firmware failure condition; it does not prove that the measurement is “normal.”
 
-The ATA table therefore labels these columns as `Score`, `Worst`, `Fail <=`, and `Vendor Raw`. A dedicated **Seagate Read / ECC Context** block identifies mirrored `01/C3` telemetry without guessing its encoding, then reports the independently understandable unresolved evidence: reallocated sectors, reported uncorrectable errors, pending sectors, offline-uncorrectable sectors, and the SMART error-log count.
+The ATA table therefore labels these columns as `Score`, `Worst`, `Fail <=`, and `Vendor Raw`. Their short explanation is rendered as merged rows inside the same 99-column table frame, so it remains visually attached to the columns it describes. A dedicated **Seagate Read / ECC Context** block identifies mirrored `01/C3` telemetry without guessing its encoding, then reports the independently understandable unresolved evidence: reallocated sectors, reported uncorrectable errors, pending sectors, offline-uncorrectable sectors, and the SMART error-log count.
 
 The explanatory report text is width-aware: it wraps at word boundaries using the current console viewport (capped to the SMART table width), keeps continuation indentation stable, and splits unusually long telemetry tokens when required instead of relying on Windows Terminal auto-wrap.
 

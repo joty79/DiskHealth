@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.10] - 2026-07-28
+
+### Fixed
+- Split Seagate unresolved evidence into a deliberate heading plus two compact counter rows, preventing `SMART Error Log=0` from becoming an orphaned continuation line at the standard report width.
+- Converted the ATA `Score/Worst` explanation into merged, padded table rows with the same 99-column outer border as the SMART table. No unbordered legend remains between the header separator and data rows.
+- Corrected the prose-width cap from 118 to 98 printable columns so explanatory text stays within the 99-column SMART table footprint.
+
+### Tests
+- Added exact 99-column merged-row width assertions, presentation guards for the grouped evidence layout, and virtual-terminal validation of the complete legend/header/data block at 100, 120, and 150 columns.
+
 ## [1.23.9] - 2026-07-28
 
 ### Fixed

@@ -823,7 +823,7 @@ function Get-SeagateReadEccContext {
 }
 
 function Get-ConsoleSafeTextWidth {
-    param([int]$Maximum = 118)
+    param([int]$Maximum = 98)
 
     $detectedWidth = 0
     try {
@@ -902,6 +902,24 @@ function Write-WrappedConsoleText {
     foreach ($wrappedLine in @(Get-WrappedConsoleLines -Text $Text -FirstPrefix $FirstPrefix -ContinuationPrefix $ContinuationPrefix -MaximumWidth $MaximumWidth)) {
         Write-Host $wrappedLine -ForegroundColor $ForegroundColor
     }
+}
+
+function Get-SmartTableLegendRows {
+    param([Parameter(Mandatory)][string[]]$TextLines)
+
+    $outerWidth = 99
+    $innerBorderWidth = $outerWidth - 4
+    $cellTextWidth = $outerWidth - 6
+    $rows = [System.Collections.Generic.List[string]]::new()
+    $rows.Add('  +' + ('-' * $innerBorderWidth) + '+')
+
+    foreach ($textLine in $TextLines) {
+        foreach ($wrappedLine in @(Get-WrappedConsoleLines -Text $textLine -MaximumWidth $cellTextWidth)) {
+            $rows.Add('  | ' + $wrappedLine.PadRight($cellTextWidth) + ' |')
+        }
+    }
+
+    return @($rows)
 }
 
 # Επιλογή ATA telemetry profile από model/firmware και, κυρίως, από το πραγματικό
@@ -2802,6 +2820,17 @@ while ($runLoop) {
 
     # 6. S.M.A.R.T. Table
     Write-Host "### 🔵 Ανάλυση S.M.A.R.T. Τιμών" -ForegroundColor $Cyan
+
+    if ($brand -ne 'NVMe') {
+        $legendRows = Get-SmartTableLegendRows -TextLines @(
+            'Score/Worst = vendor-normalized values; not errors or percentages.'
+            'Fail <= = firmware failure floor. Vendor Raw = opaque manufacturer telemetry.'
+        )
+        foreach ($legendRow in $legendRows) {
+            Write-Host $legendRow -ForegroundColor $Gray
+        }
+    }
+
     Write-Host "  +------+------------------------------------+---------+---------+-----------+-------------------+" -ForegroundColor $Gray
     if ($brand -eq 'NVMe') {
         Write-Host "  | ID   | Attribute Name                     | Current | Worst   | Threshold | Value             |" -ForegroundColor $Gray
@@ -2809,11 +2838,6 @@ while ($runLoop) {
         Write-Host "  | ID   | Attribute Name                     | Score   | Worst   | Fail <=   | Vendor Raw        |" -ForegroundColor $Gray
     }
     Write-Host "  +------+------------------------------------+---------+---------+-----------+-------------------+" -ForegroundColor $Gray
-
-    if ($brand -ne 'NVMe') {
-        $reportTextWidth = Get-ConsoleSafeTextWidth
-        Write-WrappedConsoleText -Text "Score/Worst = vendor-normalized values, όχι errors ή percentages. Fail <= = firmware failure floor." -FirstPrefix "  🔸 " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
-    }
 
     $visibleAttributes = $attributes | Sort-Object ID
 
@@ -2944,7 +2968,9 @@ while ($runLoop) {
         }
 
         $errorLogDisplay = if ($null -eq $seagateReadEcc.ErrorLogCount) { 'N/A' } else { "$($seagateReadEcc.ErrorLogCount)" }
-        Write-WrappedConsoleText -Text "Unresolved evidence: Reallocated=$($seagateReadEcc.Reallocated) | Reported Uncorrectable=$($seagateReadEcc.ReportedUncorrectable) | Pending=$($seagateReadEcc.Pending) | Offline Uncorrectable=$($seagateReadEcc.OfflineUncorrectable) | SMART Error Log=$errorLogDisplay" -FirstPrefix "  🔸 " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
+        Write-WrappedConsoleText -Text "Unresolved evidence:" -FirstPrefix "  🔸 " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
+        Write-WrappedConsoleText -Text "Reallocated=$($seagateReadEcc.Reallocated) | Reported Uncorrectable=$($seagateReadEcc.ReportedUncorrectable)" -FirstPrefix "     " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
+        Write-WrappedConsoleText -Text "Pending=$($seagateReadEcc.Pending) | Offline Uncorrectable=$($seagateReadEcc.OfflineUncorrectable) | SMART Error Log=$errorLogDisplay" -FirstPrefix "     " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
 
         if ($seagateReadEcc.HasUnresolvedIndicators) {
             Write-WrappedConsoleText -Text "Υπάρχει τουλάχιστον ένας καταγεγραμμένος unresolved/media indicator· απαιτείται ξεχωριστή αξιολόγηση και test." -FirstPrefix "  ⚠️ " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Yellow
