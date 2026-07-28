@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.3] - 2026-07-28
+
+### Fixed
+- Made the remote smartmontools installer compatible with older Windows Package Manager releases such as `winget 1.3.2691`, which reject `--disable-interactivity`.
+- The installer now inspects the remote `winget install --help` output and includes `--disable-interactivity` only when that exact CLI supports it; required package, source, scope, exact-match, and silent arguments remain unchanged.
+
+### Tests
+- Added executable old/new winget help fixtures and flat native-argument-array assertions. The full live reinstall could not be repeated because the affected target stopped accepting WinRM connections after three bounded attempts.
+
 ## [1.23.2] - 2026-07-28
 
 ### Fixed

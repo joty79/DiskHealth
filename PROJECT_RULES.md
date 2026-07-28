@@ -123,3 +123,11 @@
 - **Guardrail:** Prefer an explicit smartctl database attribute identity over brand inference. Classify a plausible `0xE7` named `SSD_Life_Left` as `Phison`, use its raw `0–100` value as remaining life, and retain model/firmware only as a bounded fallback. Preserve packed Phison `0xAA Bad_Blk_Ct_Lat/Erl`; do not interpret the combined raw field as a single failure count.
 - **Files affected:** `DiskHealth.ps1`, `tests\AtaHealthProfile.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
 - **Validation:** Official smartmontools Phison drive-database entry, raw smartctl 7.5 JSON through WinRMConnection 1.1.0, local regression fixture, and live end-to-end assertions against `192.168.1.222` for `GOOD (99%)`, `0xE7` source, Phison notes, lifetime writes, and removal of stale `N/A`.
+
+### 2026-07-28 — Winget switches require capability detection
+
+- **Problem:** An explicitly approved remote smartmontools installation failed on `winget 1.3.2691` because that CLI did not recognize `--disable-interactivity`.
+- **Root cause:** The installer assumed a modern winget argument surface instead of checking the actual remote executable.
+- **Guardrail:** Build native winget arguments as a flat PowerShell array. Query remote `winget install --help` and append optional switches only when advertised; never version-guess or pass all arguments as one nested array. Preserve the official package ID, exact matching, winget source, machine scope, and silent mode.
+- **Files affected:** `DiskHealth.ps1`, `tests\ToolingPolicy.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
+- **Validation:** Parser and executable winget 1.3/current help fixtures passed; local modern winget produced a flat 10-item argument array with the supported switch. Live reinstall was not verified because the affected `192.168.1.221` target stopped accepting TCP 5985 after three bounded attempts.

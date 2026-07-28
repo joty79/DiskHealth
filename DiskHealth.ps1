@@ -1771,6 +1771,29 @@ if ($FilePath) {
             if (-not $remoteSmartctlExists -and $installSmartctlNow) {
                 Write-Host "  ⚠️ Το remote PC δεν διαθέτει smartctl. Εκκίνηση επίσημης εγκατάστασης μέσω winget..." -ForegroundColor $Yellow
                 $installResult = Invoke-Command -Session $session -ScriptBlock {
+                    function Get-WingetSmartctlInstallArguments {
+                        param([AllowEmptyString()][string]$InstallHelp = '')
+
+                        $arguments = @(
+                            'install'
+                            '--id'
+                            'smartmontools.smartmontools'
+                            '--exact'
+                            '--source'
+                            'winget'
+                            '--scope'
+                            'machine'
+                            '--silent'
+                        )
+                        # winget 1.3 does not support this switch. Detect the
+                        # actual CLI capability instead of assuming a version.
+                        if ($InstallHelp -match '(?m)^\s*--disable-interactivity(?:\s|$)') {
+                            $arguments += '--disable-interactivity'
+                        }
+
+                        return $arguments
+                    }
+
                     $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
                     if (-not $winget) {
                         return [PSCustomObject]@{
@@ -1780,13 +1803,9 @@ if ($FilePath) {
                         }
                     }
 
-                    $wingetOutput = & $winget.Source install `
-                        --id smartmontools.smartmontools `
-                        --exact `
-                        --source winget `
-                        --scope machine `
-                        --silent `
-                        --disable-interactivity 2>&1 | Out-String
+                    $wingetInstallHelp = (& $winget.Source install --help 2>&1 | Out-String)
+                    $wingetArguments = Get-WingetSmartctlInstallArguments -InstallHelp $wingetInstallHelp
+                    $wingetOutput = & $winget.Source @wingetArguments 2>&1 | Out-String
                     $wingetExitCode = $LASTEXITCODE
                     $installedPath = 'C:\Program Files\smartmontools\bin\smartctl.exe'
                     if ($wingetExitCode -ne 0 -or -not (Test-Path -LiteralPath $installedPath -PathType Leaf)) {
