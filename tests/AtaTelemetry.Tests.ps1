@@ -12,7 +12,7 @@ if ($parseErrors) {
     throw "Production script has parser errors: $($parseErrors -join '; ')"
 }
 
-foreach ($functionName in @('Get-AtaTemperatureCelsius', 'Get-AtaSpinUpTimeDisplay', 'Get-AtaPowerOnHoursValue', 'Get-SeagateNormalizedRateState', 'Get-SeagateReadEccContext')) {
+foreach ($functionName in @('Get-AtaTemperatureCelsius', 'Get-AtaSpinUpTimeDisplay', 'Get-AtaPowerOnHoursValue', 'Get-SeagateNormalizedRateState', 'Get-SeagateReadEccContext', 'Get-ConsoleSafeTextWidth', 'Get-WrappedConsoleLines')) {
     $functionAst = $ast.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
@@ -92,6 +92,25 @@ $pendingContextAttributes = @($seagateContextAttributes | ForEach-Object {
 $pendingContext = Get-SeagateReadEccContext -Attributes $pendingContextAttributes -SmartData $seagateContextSmart -IsSeagateHdd $true
 Assert-Equal $pendingContext.HasUnresolvedIndicators $true 'Seagate pending sector remains a warning'
 
+$longContextText = 'Unresolved evidence: Reallocated=0 | Reported Uncorrectable=0 | Pending=0 | Offline Uncorrectable=0 | SMART Error Log=0'
+foreach ($terminalWidth in @(60, 90, 118)) {
+    $wrappedLines = @(Get-WrappedConsoleLines -Text $longContextText -FirstPrefix '  🔸 ' -ContinuationPrefix '     ' -MaximumWidth $terminalWidth)
+    if ($wrappedLines.Count -lt 2) {
+        throw "Expected wrapped context output at width $terminalWidth."
+    }
+    foreach ($wrappedLine in $wrappedLines) {
+        if ($wrappedLine.Length -gt $terminalWidth) {
+            throw "Context line exceeds width $terminalWidth`: '$wrappedLine'"
+        }
+    }
+}
+$longTokenLines = @(Get-WrappedConsoleLines -Text 'Raw=1234567890123456789012345678901234567890' -FirstPrefix '  🔸 ' -ContinuationPrefix '     ' -MaximumWidth 24)
+foreach ($longTokenLine in $longTokenLines) {
+    if ($longTokenLine.Length -gt 24) {
+        throw "Long telemetry token exceeds compact terminal width: '$longTokenLine'"
+    }
+}
+
 $productionText = Get-Content -LiteralPath $scriptPath -Raw
 if (-not $productionText.Contains("if (`$null -eq `$health -and `$isRotationalMedia) { 'SMART' }")) {
     throw 'HDD status must identify SMART-based evaluation instead of displaying N/A.'
@@ -99,7 +118,7 @@ if (-not $productionText.Contains("if (`$null -eq `$health -and `$isRotationalMe
 if (-not $productionText.Contains('Οι μηχανικοί HDD δεν διαθέτουν τυποποιημένο wear/health percentage.')) {
     throw 'Missing HDD-specific health explanation.'
 }
-if (-not $productionText.Contains('Το Current πάνω από Threshold σημαίνει μόνο ότι δεν ενεργοποιήθηκε failure condition')) {
+if (-not $productionText.Contains('Score πάνω από Fail <= σημαίνει μόνο ότι δεν ενεργοποιήθηκε failure condition')) {
     throw 'Missing Seagate proprietary raw-counter explanation.'
 }
 if (-not $productionText.Contains("if (`$seagateRateState -eq 'ThresholdCrossed') { `$lineColor = `$Red }")) {

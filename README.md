@@ -189,6 +189,8 @@ For Seagate HDDs, the individual values of `0x01 Raw Read Error Rate`, `0x07 See
 
 The ATA table therefore labels these columns as `Score`, `Worst`, `Fail <=`, and `Vendor Raw`. A dedicated **Seagate Read / ECC Context** block identifies mirrored `01/C3` telemetry without guessing its encoding, then reports the independently understandable unresolved evidence: reallocated sectors, reported uncorrectable errors, pending sectors, offline-uncorrectable sectors, and the SMART error-log count.
 
+The explanatory report text is width-aware: it wraps at word boundaries using the current console viewport (capped to the SMART table width), keeps continuation indentation stable, and splits unusually long telemetry tokens when required instead of relying on Windows Terminal auto-wrap.
+
 </details>
 
 <details>

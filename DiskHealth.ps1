@@ -822,6 +822,88 @@ function Get-SeagateReadEccContext {
     }
 }
 
+function Get-ConsoleSafeTextWidth {
+    param([int]$Maximum = 118)
+
+    $detectedWidth = 0
+    try {
+        $detectedWidth = [Console]::WindowWidth
+    } catch {
+        $detectedWidth = 0
+    }
+
+    if ($detectedWidth -le 0) {
+        return $Maximum
+    }
+
+    return [Math]::Max(24, [Math]::Min($Maximum, $detectedWidth - 1))
+}
+
+function Get-WrappedConsoleLines {
+    param(
+        [AllowEmptyString()][string]$Text,
+        [AllowEmptyString()][string]$FirstPrefix = '',
+        [AllowEmptyString()][string]$ContinuationPrefix = '',
+        [int]$MaximumWidth = 118
+    )
+
+    if ($MaximumWidth -le $FirstPrefix.Length -or $MaximumWidth -le $ContinuationPrefix.Length) {
+        throw "MaximumWidth $MaximumWidth is too small for the requested prefixes."
+    }
+
+    $words = @($Text -split '\s+' | Where-Object { $_.Length -gt 0 })
+    if ($words.Count -eq 0) {
+        return @($FirstPrefix)
+    }
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $line = $FirstPrefix
+    $hasContent = $false
+
+    foreach ($word in $words) {
+        $separator = if ($hasContent) { ' ' } else { '' }
+        if (($line.Length + $separator.Length + $word.Length) -le $MaximumWidth) {
+            $line += $separator + $word
+            $hasContent = $true
+            continue
+        }
+
+        if ($hasContent) {
+            $lines.Add($line)
+            $line = $ContinuationPrefix
+            $hasContent = $false
+        }
+
+        $remainingWord = $word
+        while (($line.Length + $remainingWord.Length) -gt $MaximumWidth) {
+            $available = [Math]::Max(1, $MaximumWidth - $line.Length)
+            $lines.Add($line + $remainingWord.Substring(0, $available))
+            $remainingWord = $remainingWord.Substring($available)
+            $line = $ContinuationPrefix
+        }
+
+        $line += $remainingWord
+        $hasContent = $true
+    }
+
+    $lines.Add($line)
+    return @($lines)
+}
+
+function Write-WrappedConsoleText {
+    param(
+        [AllowEmptyString()][string]$Text,
+        [AllowEmptyString()][string]$FirstPrefix = '',
+        [AllowEmptyString()][string]$ContinuationPrefix = '',
+        [int]$MaximumWidth = 118,
+        [ConsoleColor]$ForegroundColor = [ConsoleColor]::Gray
+    )
+
+    foreach ($wrappedLine in @(Get-WrappedConsoleLines -Text $Text -FirstPrefix $FirstPrefix -ContinuationPrefix $ContinuationPrefix -MaximumWidth $MaximumWidth)) {
+        Write-Host $wrappedLine -ForegroundColor $ForegroundColor
+    }
+}
+
 # Επιλογή ATA telemetry profile από model/firmware και, κυρίως, από το πραγματικό
 # attribute layout. Το brand μόνο του δεν αρκεί: διαφορετικά Patriot/Intenso SSDs
 # χρησιμοποιούν διαφορετικούς controllers και διαφορετική σημασία για τα ίδια IDs.
@@ -2683,9 +2765,10 @@ while ($runLoop) {
 
     if ($status -eq "GOOD") {
         if ($isRotationalMedia) {
-            Write-Host "  🔸 Οι μηχανικοί HDD δεν διαθέτουν τυποποιημένο wear/health percentage. Η αξιολόγηση βασίζεται στο SMART overall status, στα thresholds και στους κρίσιμους raw counters." -ForegroundColor $Gray
+            $reportTextWidth = Get-ConsoleSafeTextWidth
+            Write-WrappedConsoleText -Text "Οι μηχανικοί HDD δεν διαθέτουν τυποποιημένο wear/health percentage. Η αξιολόγηση βασίζεται στο SMART overall status, στα thresholds και στους κρίσιμους raw counters." -FirstPrefix "  🔸 " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
             if ($isSeagateHdd) {
-                Write-Host "  🔸 Seagate 01/07/C3: τα individual values είναι proprietary. Το Current πάνω από Threshold σημαίνει μόνο ότι δεν ενεργοποιήθηκε failure condition· δεν αποδεικνύει από μόνο του φυσιολογική κατάσταση." -ForegroundColor $Gray
+                Write-WrappedConsoleText -Text "Seagate 01/07/C3: τα individual values είναι proprietary. Score πάνω από Fail <= σημαίνει μόνο ότι δεν ενεργοποιήθηκε failure condition· δεν αποδεικνύει από μόνο του φυσιολογική κατάσταση." -FirstPrefix "  🔸 " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
             }
         } elseif ($null -eq $health) {
             Write-Host "  🔸 Το SMART overall status είναι επιτυχές, αλλά δεν υπάρχει αξιόπιστο vendor mapping για ποσοστό ζωής NAND." -ForegroundColor $Gray
@@ -2728,7 +2811,8 @@ while ($runLoop) {
     Write-Host "  +------+------------------------------------+---------+---------+-----------+-------------------+" -ForegroundColor $Gray
 
     if ($brand -ne 'NVMe') {
-        Write-Host "  🔸 Score/Worst = vendor-normalized values, όχι errors ή percentages. Fail <= = firmware failure floor." -ForegroundColor $Gray
+        $reportTextWidth = Get-ConsoleSafeTextWidth
+        Write-WrappedConsoleText -Text "Score/Worst = vendor-normalized values, όχι errors ή percentages. Fail <= = firmware failure floor." -FirstPrefix "  🔸 " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
     }
 
     $visibleAttributes = $attributes | Sort-Object ID
@@ -2846,27 +2930,28 @@ while ($runLoop) {
 
     $seagateReadEcc = Get-SeagateReadEccContext -Attributes $attributes -SmartData $smart -IsSeagateHdd $isSeagateHdd
     if ($null -ne $seagateReadEcc) {
+        $reportTextWidth = Get-ConsoleSafeTextWidth
         Write-Host "### 🔵 Seagate Read / ECC Context" -ForegroundColor $Cyan
-        Write-Host "  🔸 Vendor score: Current $($seagateReadEcc.Current), Worst $($seagateReadEcc.Worst), firmware failure floor $($seagateReadEcc.Threshold)." -ForegroundColor $Gray
-        Write-Host "     Τα παραπάνω είναι proprietary scores — όχι αριθμός errors, error rate ή health percentage." -ForegroundColor $Gray
+        Write-WrappedConsoleText -Text "Vendor score: Current $($seagateReadEcc.Current), Worst $($seagateReadEcc.Worst), firmware failure floor $($seagateReadEcc.Threshold)." -FirstPrefix "  🔸 " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
+        Write-WrappedConsoleText -Text "Τα παραπάνω είναι proprietary scores — όχι αριθμός errors, error rate ή health percentage." -FirstPrefix "     " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
 
         if ($seagateReadEcc.HasMirroredRawTelemetry) {
-            Write-Host "  🔸 Τα 01 Raw Read Error Rate και C3 Hardware ECC Recovered εκθέτουν το ίδιο Vendor Raw: $($seagateReadEcc.ReadRaw)." -ForegroundColor $Gray
-            Write-Host "     Η κοινή τιμή δείχνει shared read/ECC telemetry· η Seagate δεν δημοσιεύει αποκωδικοποίηση ή μονάδα μέτρησης." -ForegroundColor $Gray
+            Write-WrappedConsoleText -Text "Τα 01 Raw Read Error Rate και C3 Hardware ECC Recovered εκθέτουν το ίδιο Vendor Raw: $($seagateReadEcc.ReadRaw)." -FirstPrefix "  🔸 " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
+            Write-WrappedConsoleText -Text "Η κοινή τιμή δείχνει shared read/ECC telemetry· η Seagate δεν δημοσιεύει αποκωδικοποίηση ή μονάδα μέτρησης." -FirstPrefix "     " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
         } else {
-            Write-Host "  🔸 Vendor Raw 01: $($seagateReadEcc.ReadRaw) | Vendor Raw C3: $($seagateReadEcc.EccRaw)." -ForegroundColor $Gray
-            Write-Host "     Οι τιμές διατηρούνται για baseline/trend comparison και δεν μετατρέπονται σε υποθετικό error count." -ForegroundColor $Gray
+            Write-WrappedConsoleText -Text "Vendor Raw 01: $($seagateReadEcc.ReadRaw) | Vendor Raw C3: $($seagateReadEcc.EccRaw)." -FirstPrefix "  🔸 " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
+            Write-WrappedConsoleText -Text "Οι τιμές διατηρούνται για baseline/trend comparison και δεν μετατρέπονται σε υποθετικό error count." -FirstPrefix "     " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
         }
 
         $errorLogDisplay = if ($null -eq $seagateReadEcc.ErrorLogCount) { 'N/A' } else { "$($seagateReadEcc.ErrorLogCount)" }
-        Write-Host "  🔸 Unresolved evidence: Reallocated=$($seagateReadEcc.Reallocated) | Reported Uncorrectable=$($seagateReadEcc.ReportedUncorrectable) | Pending=$($seagateReadEcc.Pending) | Offline Uncorrectable=$($seagateReadEcc.OfflineUncorrectable) | SMART Error Log=$errorLogDisplay" -ForegroundColor $Gray
+        Write-WrappedConsoleText -Text "Unresolved evidence: Reallocated=$($seagateReadEcc.Reallocated) | Reported Uncorrectable=$($seagateReadEcc.ReportedUncorrectable) | Pending=$($seagateReadEcc.Pending) | Offline Uncorrectable=$($seagateReadEcc.OfflineUncorrectable) | SMART Error Log=$errorLogDisplay" -FirstPrefix "  🔸 " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
 
         if ($seagateReadEcc.HasUnresolvedIndicators) {
-            Write-Host "  ⚠️ Υπάρχει τουλάχιστον ένας καταγεγραμμένος unresolved/media indicator· απαιτείται ξεχωριστή αξιολόγηση και test." -ForegroundColor $Yellow
+            Write-WrappedConsoleText -Text "Υπάρχει τουλάχιστον ένας καταγεγραμμένος unresolved/media indicator· απαιτείται ξεχωριστή αξιολόγηση και test." -FirstPrefix "  ⚠️ " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Yellow
         } elseif ($null -ne $seagateReadEcc.ErrorLogCount) {
-            Write-Host "  ✅ Δεν καταγράφηκε unresolved read/media error στα διαθέσιμα counters και στο SMART Error Log αυτού του snapshot." -ForegroundColor $Green
+            Write-WrappedConsoleText -Text "Δεν καταγράφηκε unresolved read/media error στα διαθέσιμα counters και στο SMART Error Log αυτού του snapshot." -FirstPrefix "  ✅ " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Green
         } else {
-            Write-Host "  🔸 Δεν καταγράφηκε unresolved read/media error στα διαθέσιμα counters· το SMART Error Log δεν ήταν διαθέσιμο." -ForegroundColor $Gray
+            Write-WrappedConsoleText -Text "Δεν καταγράφηκε unresolved read/media error στα διαθέσιμα counters· το SMART Error Log δεν ήταν διαθέσιμο." -FirstPrefix "  🔸 " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
         }
         Write-Host ""
     }

@@ -173,3 +173,11 @@
 - **Guardrail:** Label ATA columns `Score`, `Worst`, `Fail <=`, and `Vendor Raw`. For Seagate HDDs, identify identical `01/C3` telemetry as shared proprietary evidence without converting it to an error count. Present reallocated, reported-uncorrectable, pending, offline-uncorrectable, and SMART error-log counters separately, and state only whether unresolved evidence was recorded in the snapshot.
 - **Files affected:** `DiskHealth.ps1`, `tests\AtaTelemetry.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
 - **Validation:** All eight regression/integration suites, the focused Windows PowerShell 5.1 fixture, parser validation, PSScriptAnalyzer error review, and `git diff --check` passed. An elevated live WinRM render against `NEOS / 192.168.1.6` confirmed the new headings, mirrored `01/C3` explanation, five zero unresolved indicators, and absence of any invented error-count claim.
+
+### 2026-07-28 — Report prose must be virtual-terminal width-safe
+
+- **Problem:** The new Seagate Read/ECC explanation contained long logical lines that Windows Terminal auto-wrapped at the viewport edge, breaking indentation and pushing text outside the intended visual width.
+- **Root cause:** Live assertions inspected captured text content but did not emulate terminal cell wrapping or constrain prose to the current viewport.
+- **Guardrail:** Route diagnostic prose through a shared word-wrap helper using `min(118, Console.WindowWidth - 1)`, stable continuation prefixes, and a long-token fallback. Validate new terminal output at multiple widths with a real virtual-terminal emulator; string-content assertions alone are insufficient for UI layout.
+- **Files affected:** `DiskHealth.ps1`, `tests\AtaTelemetry.Tests.ps1`, `README.md`, `CHANGELOG.md`, `PROJECT_RULES.md`.
+- **Validation:** `60/90/118` PowerShell fixtures and compact long-token regression passed. Temporary `pyte 0.8.2` virtual terminals rendered the synthetic block without extra rows at `90/110/130/150` columns; the live NEOS Seagate block rendered `8 source rows → 8 terminal rows` at 120 columns with a maximum rendered width of 117.
