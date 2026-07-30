@@ -42,7 +42,10 @@ For NVMe drives connected through USB/UASP enclosures, DiskHealth maps `/dev/sd*
 
 Remote use remembers successful PCs per network. Opening **Network computer (WinRM)** first probes only previously connected PCs associated with the current network identity; the selector offers a separate full LAN scan when needed. Target metadata lives in `%LOCALAPPDATA%\WinRMDiscovery`, while credentials use the shared Windows DPAPI profile store under `%LOCALAPPDATA%\WinRMConnection\credentials`. Each profile remains scoped to the matching DiskHealth `NetworkId` plus hostname/IP aliases.
 
-Authenticated session opening uses the pinned shared `WinRMConnection` module. It performs a short TCP preflight, reports each of up to three bounded attempts, retries only transient transport failures, and stops immediately for authentication, TrustedHosts, name-resolution, or configuration failures.
+After the operator selects a specific PC, the pinned shared `WinRMWorkshop` module prepares only that exact hostname/IP in the local WinRM `TrustedHosts` list, preserves other exact entries, elevates through direct `gsudo.exe` when needed, and verifies the real readback. It never broadens the list to `*` and does not add a second trust prompt. Authenticated session opening then uses the pinned shared `WinRMConnection` module, with a short TCP preflight, visible bounded attempts, transient-only retries, and immediate failure for authentication, name-resolution, or configuration errors.
+
+> [!WARNING]
+> The workshop profile prioritizes fast diagnostics on a private repair-bench LAN. It intentionally permits WinRM over HTTP/5985 with NTLM, optional blank-password local accounts, and target-side remote-administration relaxations. Do not expose WinRM through router port forwarding or use this profile on Public/untrusted networks. Target-side enablement is persistent until it is explicitly reverted; DiskHealth currently manages only the local client's exact-target `TrustedHosts` entry.
 
 Slow storage APIs are called only when they can add evidence. In particular, `Get-StorageReliabilityCounter` is never queried for USB disks and smartctl identity probes are a fallback only when the deterministic Windows disk-index mapping is unavailable.
 
@@ -149,7 +152,8 @@ DiskHealth/
 ├── .gitattributes                       # Repository line-ending policy
 ├── .assets/
 │   ├── WinRMConnection/                 # Pinned shared authenticated WinRM connector
-│   └── WinRMDiscovery/                  # Pinned shared LAN PC discovery module
+│   ├── WinRMDiscovery/                  # Pinned shared LAN PC discovery module
+│   └── WinRMWorkshop/                   # Pinned exact-target TrustedHosts preparation
 ├── .agents/                             # Workspace Customizations
 │   └── AGENTS.md                        # Workspace rule mandates (e.g. smartctl notification)
 ├── diagnostic_reports/                  # Consolidated telemetry data, CDI reports, and screenshots
@@ -172,7 +176,8 @@ DiskHealth/
 │   ├── ToolingPolicy.Tests.ps1           # smartmontools acquisition/placement guardrails
 │   ├── TuiResizeRegression.Tests.ps1     # Sequential pyte resize/scroll/stale-frame replay
 │   ├── WinRMConnectionIntegration.Tests.ps1 # Authenticated connector integration guard
-│   └── WinRMDiscoveryIntegration.Tests.ps1 # Discovery integration guard
+│   ├── WinRMDiscoveryIntegration.Tests.ps1 # Discovery integration guard
+│   └── WinRMWorkshopIntegration.Tests.ps1 # Exact-target preparation integration guard
 ├── README.md                            # You are here
 ├── CHANGELOG.md                         # Project changelog
 └── PROJECT_RULES.md                     # Durable project decisions and validation history

@@ -192,6 +192,24 @@ function Import-DiskHealthWinRMConnection {
     }
 }
 
+function Import-DiskHealthWinRMWorkshop {
+    $manifest = Join-Path -Path $PSScriptRoot -ChildPath '.assets\WinRMWorkshop\WinRMWorkshop.psd1'
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+        throw "Το WinRMWorkshop module δεν βρέθηκε: $manifest"
+    }
+
+    if (-not (Get-Module -Name WinRMWorkshop)) {
+        Import-Module -Name $manifest -Force -ErrorAction Stop
+    }
+}
+
+function Write-DiskHealthWinRMWorkshopStatus {
+    param([Parameter(Mandatory)]$Status)
+
+    $statusColor = if ($Status.State -eq 'Ready') { $Green } else { $Cyan }
+    Write-Host "  🔐 $($Status.Message)" -ForegroundColor $statusColor
+}
+
 function Write-DiskHealthWinRMConnectionStatus {
     param([Parameter(Mandatory)]$Status)
 
@@ -2285,51 +2303,12 @@ if ($FilePath) {
                 -Phase 'Collector.Invoke.Local' `
                 -Milliseconds $collectorInvokeWatch.Elapsed.TotalMilliseconds
         } else {
-            # Έλεγχος και αυτόματη προσθήκη στα TrustedHosts του WinRM Client
-            $currentTrusted = (Get-Item WSMan:\localhost\Client\TrustedHosts -ErrorAction SilentlyContinue).Value
-            $trustedList = if ($currentTrusted) { $currentTrusted -split ',' | ForEach-Object { $_.Trim() } } else { @() }
-
-            if ($currentTrusted -ne "*" -and -not ($trustedList -contains $ComputerName)) {
-                Write-Host "  ⚠️ Η IP/Hostname '$ComputerName' δεν είναι στα TrustedHosts του WinRM." -ForegroundColor $Yellow
-                Write-Host "  🔧 Προσπάθεια αυτόματης προσθήκης..." -ForegroundColor $Cyan
-
-                $newValue = if ($currentTrusted) { "$currentTrusted,$ComputerName" } else { $ComputerName }
-
-                $currentPrincipal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-                $isAdmin = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-
-                if ($isAdmin) {
-                    try {
-                        Set-Item WSMan:\localhost\Client\TrustedHosts -Value $newValue -Force -ErrorAction Stop
-                        Write-Host "  ✅ Προστέθηκε με επιτυχία στα TrustedHosts!" -ForegroundColor $Green
-                    } catch {
-                        Write-Host "  ❌ Αποτυχία προσθήκης στα TrustedHosts: $_" -ForegroundColor $Red
-                    }
-                } else {
-                    Write-Host "  🔑 Απαιτούνται δικαιώματα Administrator. Δοκιμή elevation..." -ForegroundColor $Yellow
-
-                    # Δημιουργία scratch script για αποφυγή command line/serialization errors (Κανόνας 4 & 3)
-                    $scratchFile = Join-Path $env:TEMP "set-trustedhosts-$pid.ps1"
-                    "Set-Item WSMan:\localhost\Client\TrustedHosts -Value '$newValue' -Force" | Out-File -FilePath $scratchFile -Encoding utf8 -Force
-
-                    $gsudoPath = Get-Command gsudo -ErrorAction SilentlyContinue
-                    if ($gsudoPath) {
-                        & gsudo pwsh -NoProfile -File $scratchFile
-                        if ($LASTEXITCODE -eq 0) {
-                            Write-Host "  ✅ Προστέθηκε στα TrustedHosts μέσω gsudo!" -ForegroundColor $Green
-                        } else {
-                            Write-Host "  ❌ Αποτυχία προσθήκης μέσω gsudo." -ForegroundColor $Red
-                        }
-                    } else {
-                        try {
-                            Start-Process pwsh -ArgumentList "-NoProfile -File `"$scratchFile`"" -Verb RunAs -Wait -ErrorAction Stop
-                            Write-Host "  ✅ Προστέθηκε στα TrustedHosts μέσω UAC!" -ForegroundColor $Green
-                        } catch {
-                            Write-Host "  ❌ Αποτυχία προσθήκης (άρνηση UAC ή σφάλμα)." -ForegroundColor $Red
-                        }
-                    }
-                    Remove-Item $scratchFile -ErrorAction SilentlyContinue
-                }
+            Import-DiskHealthWinRMWorkshop
+            $workshopPreparation = Add-WinRMWorkshopTrustedHost `
+                -ComputerName $ComputerName `
+                -OnStatus ${function:Write-DiskHealthWinRMWorkshopStatus}
+            if (-not $workshopPreparation.Verified) {
+                throw "Η exact-target TrustedHosts προετοιμασία απέτυχε για '$ComputerName'."
             }
 
             $sessionWatch = [System.Diagnostics.Stopwatch]::StartNew()

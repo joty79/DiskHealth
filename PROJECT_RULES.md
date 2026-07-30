@@ -5,7 +5,7 @@
 - Αυτό είναι το current contract. Το root `AGENTS.md` είναι ο automatic router. Το πλήρες παλιό diary διατηρείται hash-verified στο `docs/history/PROJECT_RULES_2026-07-30.pre-modular.snapshot.md` και ανοίγει μόνο με targeted search.
 - `DiskHealth.ps1` είναι canonical. Χωρίς arguments ζητά πρώτα Local ή Network και δεν συλλέγει δεδομένα πριν από επιλογή. `Get-DiskHealth.ps1` μόνο προωθεί parameters για compatibility.
 - Μία SMART λογική παράγει captured diagnostic output για responsive TUI και plain `-NoUI`; μην δημιουργείς δεύτερο renderer ή health rules.
-- Canonical shared owners: `.agent-shared` TUI blueprint, `WinRMDiscovery` για discovery/history και `WinRMConnection` για authenticated sessions/DPAPI. Τα project copies είναι pinned consumers, hash-verified στο startup/μέσω sync και δεν διορθώνονται απευθείας.
+- Canonical shared owners: `.agent-shared` TUI blueprint, `WinRMDiscovery` για discovery/history, `WinRMWorkshop` για exact-target client preparation και `WinRMConnection` για authenticated sessions/DPAPI. Τα project copies είναι pinned consumers, hash-verified μέσω sync και δεν διορθώνονται απευθείας.
 
 ## UI And Operator Flow
 
@@ -36,7 +36,7 @@
 ## WinRM Consumer Contract
 
 - Network UI: bounded discovery → επιλογή target → authentication → μία session → diagnostics. Λίγα δευτερόλεπτα discovery είναι αποδεκτά· μην απαιτείς flags ή manual IP setup από τον end user.
-- Η επιλογή exact target εξουσιοδοτεί το υπάρχον exact-target TrustedHosts preparation. Χωρίς δεύτερο prompt ή wildcard. Το mutation μένει consumer-owned, όχι μέσα στα shared modules.
+- Η επιλογή exact target εξουσιοδοτεί το pinned `WinRMWorkshop` να διατηρήσει τα υπάρχοντα exact entries, να προσθέσει μόνο το επιλεγμένο hostname/IP με verified elevation/readback και να συνεχίσει χωρίς δεύτερο prompt. Wildcard ή consumer-owned mutation απαγορεύονται.
 - Metadata/username μένει network-scoped στο `WinRMDiscovery`. Credentials μόνο με DPAPI APIs και `NetworkId` scope, μετά από successful authentication· ποτέ plaintext/repo.
 - TCP 5985 είναι preflight, όχι authenticated success. Δείξε bounded attempt status, retry μόνο transient failures και αφαίρεσε cached credential μόνο μετά από `AuthenticationRejected`.
 - Reuse μία `PSSession`, κλείσε σε `finally` και μην ξανατρέχεις collection μετά από πιθανό partial execution.

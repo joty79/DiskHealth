@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.3] - 2026-07-30
+
+### Changed
+- Αντικαταστάθηκε το ad-hoc DiskHealth `TrustedHosts`/elevation block με το pinned shared `WinRMWorkshop` module. Η επιλογή συγκεκριμένου PC στο UI προσθέτει μόνο το exact hostname/IP, διατηρεί τα υπόλοιπα exact entries και απαιτεί πραγματικό readback verification χωρίς δεύτερο prompt.
+- Καταγράφηκε στο README το deliberate workshop security profile: WinRM HTTP/5985 + NTLM, optional blank-password local accounts και persistent target-side enablement για γρήγορο private-LAN service workflow.
+
+### Fixed
+- Αφαιρέθηκαν το προσωρινό `set-trustedhosts-*.ps1`, η αμφίσημη PowerShell `gsudo` wrapper επίκληση και τα success messages που μπορούσαν να εμφανιστούν χωρίς επαληθευμένη αλλαγή.
+
+### Tests
+- Προστέθηκε integration guard για το vendored `WinRMWorkshop` module, το canonical API call και την απουσία consumer-owned `TrustedHosts` mutation.
+- Το shared direct-`gsudo.exe` live smoke μετέτρεψε το πραγματικό local `TrustedHosts = *` σε `192.168.1.6` και επιβεβαίωσε το elevated readback. Δεν εκτελέστηκε remote DiskHealth collection ή target-side mutation σε αυτή την αλλαγή.
+
 ## [1.24.2] - 2026-07-29
 
 ### Changed

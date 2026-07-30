@@ -13,6 +13,7 @@
 | SMART/NVMe, USB, vendor mapping | Relevant `PROJECT_RULES.md` section + focused fixtures |
 | Interactive UI, resize, cursor, keys | Global PowerShell UI workflow + `.agent-shared` TUI blueprint |
 | LAN discovery/history | `winrm-discovery` skill + synced `.assets\WinRMDiscovery` |
+| UI-selected target / TrustedHosts preparation | `winrm-workshop` skill + synced `.assets\WinRMWorkshop` |
 | Credentials/session/retries | `winrm-connection` skill + synced `.assets\WinRMConnection` |
 | PowerShell/parser/native arguments | Global PowerShell scripting workflow |
 | Old incident/regression evidence | Targeted search στο `docs\history`; ποτέ wholesale ως instructions |
