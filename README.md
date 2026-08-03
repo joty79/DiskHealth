@@ -36,11 +36,11 @@
 
 A native PowerShell script that connects locally or remotely via WinRM, queries `root\wmi` storage classes, and parses S.M.A.R.T. data natively.
 
-For SATA/IDE drives, it queries S.M.A.R.T. byte arrays and resolves controller-specific layouts instead of trusting brand names alone. Samsung, Silicon Motion OEM, Patriot Burst, Phison, and SanDisk/WD profiles remain separate because the same attribute ID can mean different things on different controllers. For NVMe drives, it automatically checks if **smartctl** is installed (with JSON output support) to get full S.M.A.R.T. telemetry, falling back to CIM Storage Reliability Counters (`MSFT_StorageReliabilityCounter`) if smartctl is absent.
+For SATA/IDE SSDs, it first requests the standardized ATA Solid State Device Statistics page and converts `Percentage Used Endurance` into remaining life. This works even when the exact model is absent from the smartmontools drive database. DiskHealth automatically selects trustworthy standard, database, verified-controller, or Windows Storage evidence; the operator sees the binary outcome `SUPPORTED` or `UNSUPPORTED`, not an apparent `GOOD (N/A)`. Controller-specific Samsung, Silicon Motion OEM, Patriot Burst, Phison, Kingston UV400, and SanDisk/WD mappings also decode proprietary telemetry because the same legacy SMART attribute ID can mean different things on different controllers. For NVMe drives, it automatically checks if **smartctl** is installed (with JSON output support) to get full S.M.A.R.T. telemetry, falling back to CIM Storage Reliability Counters (`MSFT_StorageReliabilityCounter`) if smartctl is absent.
 
 For NVMe drives connected through USB/UASP enclosures, DiskHealth maps `/dev/sd*` back to the corresponding Windows `PhysicalDrive` index, so an enclosure that rewrites the visible model or serial cannot prevent the underlying NVMe telemetry from being selected. It prefers bridge types returned by `smartctl --scan-open`; an exact USB VID:PID allowlist is used only for live-verified controllers that scan as generic SCSI wrappers, currently `152D:0581` with `sntjmicron`.
 
-Remote use remembers successful PCs per network. Opening **Network computer (WinRM)** first probes only previously connected PCs associated with the current network identity; the selector offers a separate full LAN scan when needed. Target metadata lives in `%LOCALAPPDATA%\WinRMDiscovery`, while credentials use the shared Windows DPAPI profile store under `%LOCALAPPDATA%\WinRMConnection\credentials`. Each profile remains scoped to the matching DiskHealth `NetworkId` plus hostname/IP aliases.
+Remote use remembers successful PCs per network. Opening **Network computer (WinRM)** now renders a local-only target catalog immediately: without a fresh scan, saved PCs are labeled `Saved / not checked`; after an explicit scan, the same rows show the independent fresh reachability result (`WinRMReady`, management closed, or offline) while still requiring selected-row validation before authentication. **Scan network for more PCs** is always available and never runs automatically merely because history is empty. Target metadata lives in `%LOCALAPPDATA%\WinRMDiscovery`, while credentials use the shared Windows DPAPI profile store under `%LOCALAPPDATA%\WinRMConnection\credentials`. Each profile remains scoped to the matching DiskHealth `NetworkId` plus hostname/IP aliases.
 
 After the operator selects a specific PC, the pinned shared `WinRMWorkshop` module prepares only that exact hostname/IP in the local WinRM `TrustedHosts` list, preserves other exact entries, elevates through direct `gsudo.exe` when needed, and verifies the real readback. It never broadens the list to `*` and does not add a second trust prompt. Authenticated session opening then uses the pinned shared `WinRMConnection` module, with a short TCP preflight, visible bounded attempts, transient-only retries, and immediate failure for authentication, name-resolution, or configuration errors.
 
@@ -105,9 +105,11 @@ pwsh -NoProfile -File "DiskHealth.ps1" -ComputerName "192.168.1.118" -Benchmark
 | `-InstallSmartctl` | `switch` | `false` | Automation override that approves the official `winget` machine-scope installation without showing the interactive question. |
 | `-Discover` | `switch` | `false` | Uses the shared PC-only LAN discovery engine and opens a target selector before WinRM collection. |
 | `-DiscoveryStateRoot` | `string` | `""` | Optional absolute path for network-scoped discovery history/cache. |
-| `-Benchmark` | `switch` | `false` | Writes phase timings to `%LOCALAPPDATA%\DiskHealth\logs\probe_benchmark_*.log`. |
+| `-Benchmark` | `switch` | `false` | Enables structured JSONL stage metrics and a duration-sorted summary under Git-ignored `diagnostic_reports\performance`. The normal interactive Network flow enables the same diagnostics automatically. |
 
-Normal no-argument launch performs **no disk scan first**. It opens an arrow-selectable source menu with `💻 Local computer` and `🌐 Network computer (WinRM)`. The Local disk menu contains disks only. The Network path lists reachable saved PCs from the current network first and includes **Scan network for more PCs** when a full discovery is wanted.
+Normal no-argument launch performs **no disk or LAN scan first**. It opens an arrow-selectable source menu with `💻 Local computer` and `🌐 Network computer (WinRM)`. The Local disk menu contains disks only. The Network path lists saved/recent targets from local state and always includes **Scan network for more PCs** when full discovery is wanted.
+
+The Network flow immediately shows the active stage and elapsed time instead of leaving a blank/frozen screen. Each run uses one correlation ID and records monotonic stage durations, UTC boundaries, status, attempt/result counts and sanitized error categories. Canonical `WinRMDiscovery` 1.4.0 records local history/snapshot/merge timings; selected saved targets then add last-IP, MAC/neighbor, bounded system-name-resolution and TCP 5985 timings. No bulk saved-target resolver runs before the menu. The JSONL log never includes passwords, credential objects, target identifiers, customer filenames or native command arguments.
 
 After a successful authenticated session opens, DiskHealth remembers the username in shared connection history and stores the credential locally with Windows DPAPI. On the same network it tries that credential first; only an `AuthenticationRejected` result removes a cached profile and triggers one replacement prompt. TCP, timeout, and transport failures preserve it. The credential can be decrypted only by the same Windows user in the same Windows installation, so copying the profile—or formatting Windows—does not make it portable.
 
@@ -154,15 +156,19 @@ DiskHealth/
 │   ├── WinRMConnection/                 # Pinned shared authenticated WinRM connector
 │   ├── WinRMDiscovery/                  # Pinned shared LAN PC discovery module
 │   └── WinRMWorkshop/                   # Pinned exact-target TrustedHosts preparation
-├── .agents/                             # Workspace Customizations
-│   └── AGENTS.md                        # Workspace rule mandates (e.g. smartctl notification)
+├── .agents/                             # Legacy cross-agent compatibility files
+│   └── AGENTS.md                        # Not part of the Codex root instruction chain
+├── AGENTS.md                            # Active compact Codex project router
 ├── diagnostic_reports/                  # Consolidated telemetry data, CDI reports, and screenshots
+│   ├── performance/                     # Git-ignored structured timing logs and sorted summaries
 │   ├── 63/                              # CDI reports for remote host 192.168.1.63
 │   ├── kartalis i5 4300m/               # CDI reports for Patriot SSD target
 │   ├── local/                           # CDI reports for local NVMe drive
 │   ├── newssd/                          # CDI reports for new good SSD target
 │   ├── CrystalDiskInfo_20260713101407.txt # Backup Samsung SSD CDI report
 │   └── CrystalDiskInfo_20260713101417.png # Backup Samsung SSD CDI screenshot
+├── docs/
+│   └── history/                         # Searchable historical evidence; not active instructions
 ├── DiskHealth.ps1                       # Canonical interactive and CLI entrypoint
 ├── Get-DiskHealth.ps1                   # Backward-compatible launcher
 ├── PS_UI_Blueprint.psm1                 # Generated mirror of the canonical shared TUI runtime
@@ -171,6 +177,7 @@ DiskHealth/
 │   ├── AtaHealthProfile.Tests.ps1       # Controller profile, health-source, and WD mapping fixtures
 │   ├── AtaTelemetry.Tests.ps1           # Packed ATA temperature regression fixtures
 │   ├── NvmeTelemetry.Tests.ps1          # Regression fixtures for 128-bit NVMe counters
+│   ├── PerformanceInstrumentation.Tests.ps1 # Structured stages, timeout/failure and secret guards
 │   ├── SmartctlBridgeMapping.Tests.ps1   # Windows PhysicalDrive and USB/UASP bridge mapping
 │   ├── RemoteHistoryPerformance.Tests.ps1 # DPAPI/network scope and slow-probe guards
 │   ├── ToolingPolicy.Tests.ps1           # smartmontools acquisition/placement guardrails
@@ -180,7 +187,7 @@ DiskHealth/
 │   └── WinRMWorkshopIntegration.Tests.ps1 # Exact-target preparation integration guard
 ├── README.md                            # You are here
 ├── CHANGELOG.md                         # Project changelog
-└── PROJECT_RULES.md                     # Durable project decisions and validation history
+└── PROJECT_RULES.md                     # Compact current contract and targeted retrieval index
 ```
 
 ---
@@ -259,11 +266,19 @@ It converts raw hexadecimal values automatically:
 <details>
 <summary><b>How is the Health Status determined?</b></summary>
 
-For Samsung SSDs, the health % can use the normalized **Wear Leveling Count (0xB1)**. Confirmed Silicon Motion OEM and Patriot Burst layouts use raw **Remaining Lifetime Percentage (0xA9)**. Smartctl-recognized Phison layouts use raw **SSD Life Left (0xE7)**, while NVMe uses **Percentage Used (0x05)**. Recognized WD/SanDisk SATA SSD layouts display raw **Available Reserved Space (0xE8)** explicitly as `Reserve n%`; this is a vendor reserve/endurance metric, not a clone of another program's proprietary overall-health formula. A generic ATA `0xB1` is not trusted automatically: if the controller layout is unknown, DiskHealth reports `N/A` for the percentage while keeping the independent SMART overall status and failure indicators visible.
+For ATA SSDs, valid Device Statistics page 7 is the primary vendor-neutral source: `remaining life = max(0, 100 - Percentage Used Endurance)`. Values above 100% used are preserved as raw evidence while remaining life is clamped to 0%. DiskHealth then automatically tries a matched smartmontools database interpretation, verified controller mappings, and finally the Windows Storage `Wear` counter for internal non-USB SSDs. The report remains binary: a trustworthy reading produces `SUPPORTED`; otherwise it produces `UNSUPPORTED` and never invents zero or reports `GOOD (N/A)`. Samsung, Silicon Motion OEM, Patriot Burst, Phison, Kingston UV400, and WD/SanDisk mappings retain their distinct attribute semantics. NVMe uses **Percentage Used (0x05)**, while a generic ATA `0xB1` is never trusted automatically.
+
+This standardized path was verified live on an `ADATA SSD DM900 256GB-DL4 / R0427ANR` that is absent from smartmontools 7.5 `drivedb.h`: smartctl ATA Device Statistics and openSeaChest 26.03 both reported `53% used`, corresponding to `Life 47%` and matching `0xA9 raw=47`. Its SM2258-family layout also decodes `F1/F2/F5` as 32 MiB counters. The live report showed `31,443.19 GiB` Host Reads, `43,148.78 GiB` Host Writes, `213,486.75 GiB` NAND Writes, and `4.95x` lifetime write amplification, matching CrystalDiskInfo/Hard Disk Sentinel within the counter growth between snapshots. Reads are displayed but are not part of WAF: `WAF = NAND Writes / Host Writes`.
+
+SanDisk/WD SATA SSDs use a different transfer-counter contract: `F1/F2` are logical LBAs and are converted with the drive-reported logical block size, never treated directly as GiB. A live `SanDisk X600 M.2 2280 SATA 256GB` reported 512-byte sectors and resolved to about `14.84 TiB` Host Writes and `26.29 TiB` Host Reads. If the logical block size is unavailable, those totals remain raw and `UNSUPPORTED`.
+
+The same X600 exposes two close lifetime readings: standardized ATA page 7 gives `96%` remaining, while normalized vendor attribute `0xEE` gives `94%`. DiskHealth reports the conservative `Life 94%` and keeps both values in the source explanation. Small standard/vendor differences up to five percentage points are reconciled this way; larger conflicts are not silently collapsed. A standalone Windows Storage `Wear=0` is treated as unsupported because SATA drivers may return zero as a default even when measurable wear exists.
 
 The distinction matters for OEM drives with generic names. A live `SSD 120GB / U0510A0` sample was absent from the smartctl drive database but exposed the complete Silicon Motion OEM signature: `0xA9 = 91` was remaining life, whereas `0xB1` was a separate total-wear counter whose normalized value happened to be `100`.
 
 A separate live `Patriot Burst / SBFM61.3` sample is an officially recognized Phison-driven SSD. Its `0xE7 SSD_Life_Left = 99` is used as the trusted percentage and `0xF1 Lifetime_Writes_GiB` is reported without unit conversion. Its packed `0xAA Bad_Blk_Ct_Lat/Erl` raw field is preserved rather than misreported as a single bad-block count.
+
+The Kingston UV400 has a different `0xE7` contract: on a live `KINGSTON SUV400S37120G / 0C3J96R9`, `Current=80` is the vendor-defined remaining life while `Raw=20` is separate telemetry. Its `0xB7 raw=106` is absent from the published [Kingston UV400 SMART Attribute Details](https://media.kingston.com/support/downloads/UV400-SMART-attribute.pdf), so DiskHealth keeps it visible as undocumented vendor telemetry without converting it into a bad-block or SATA-downshift failure claim.
 
 If critical degradation values (like reallocated sectors, pending sectors, or uncorrectable read/write events) are above zero, the health status is automatically set to `CAUTION` (or `BAD`), breaking the common firmware illusion of reporting a "Good" status based on remaining writes alone. `CAUTION` does not automatically mean immediate replacement: retired blocks without current program/erase/uncorrectable errors require backup, an extended SMART self-test, and a later comparison against the saved baseline. A failed self-test, increasing counters, threshold crossing, or active data errors justifies escalation.
 

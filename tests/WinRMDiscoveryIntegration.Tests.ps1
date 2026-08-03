@@ -31,6 +31,7 @@ if ($computerNameParameter.DefaultValue.Value -ne 'localhost') {
 foreach ($requiredFunction in @(
     'Get-MenuDisplayText'
     'Get-DiskHealthWinRMComputers'
+    'Get-DiskHealthCatalogTargetPresentation'
     'Get-DiskHealthSavedWinRMTargets'
     'Get-DiskHealthStoredCredential'
     'Save-DiskHealthStoredCredential'
@@ -63,8 +64,60 @@ $localRoutingPattern = 'if\s*\(\$startupChoice\s+-eq\s+''Local''\)[\s\S]{0,500}-
 if ($source -notmatch $localRoutingPattern) {
     throw 'Local startup choice must run as an embedded target so ESC can return to the main menu.'
 }
-if ($source -notmatch '\$networkComputers\s*=\s*@\(Get-DiskHealthWinRMComputers' -or $source -notmatch 'Select-WinRMDiscoveryTarget\s+-Computers\s+\$networkComputers') {
-    throw 'Network results must be reused when returning from remote disks to the computer selector.'
+if ($source -notmatch '\$savedState\s*=\s*Get-DiskHealthSavedWinRMTargets' -or $source -notmatch 'Select-WinRMDiscoveryTarget\s+-Computers\s+\$networkComputers') {
+    throw 'The Network selector must be built from the reusable local target catalog.'
+}
+$savedTargetFunction = $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-DiskHealthSavedWinRMTargets'
+}, $true) | Select-Object -First 1
+if ($savedTargetFunction.Extent.Text -notmatch 'Get-WinRMTargetCatalog' -or $savedTargetFunction.Extent.Text -match 'Resolve-DiskHealthSavedWinRMTargetsParallel') {
+    throw 'Initial target loading must use the local-only catalog without bulk saved-target validation.'
+}
+$presentationFunction = $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-DiskHealthCatalogTargetPresentation'
+}, $true) | Select-Object -First 1
+Invoke-Expression $presentationFunction.Extent.Text
+$savedFixture = [PSCustomObject]@{
+    HasSavedHistory      = $true
+    HasDiscoverySnapshot = $false
+    WinRMHttpOpen        = $false
+    SMBOpen              = $false
+    DetectedOnly         = $false
+    CachedStatus         = $null
+    ValidationStatus     = 'NotChecked'
+}
+$freshOnlineFixture = [PSCustomObject]@{
+    HasSavedHistory      = $true
+    HasDiscoverySnapshot = $true
+    WinRMHttpOpen        = $true
+    SMBOpen              = $true
+    DetectedOnly         = $false
+    CachedStatus         = 'WinRMReady'
+    ValidationStatus     = 'NotChecked'
+}
+$notCheckedPresentation = Get-DiskHealthCatalogTargetPresentation -Entry $savedFixture -HasFreshSnapshot $false
+$offlinePresentation = Get-DiskHealthCatalogTargetPresentation -Entry $savedFixture -HasFreshSnapshot $true
+$onlinePresentation = Get-DiskHealthCatalogTargetPresentation -Entry $freshOnlineFixture -HasFreshSnapshot $true
+if ($notCheckedPresentation.Status -ne 'Saved / not checked' -or $notCheckedPresentation.WinRMHttpOpen) {
+    throw 'A saved target without a fresh scan does not preserve the not-checked reachability state.'
+}
+if ($offlinePresentation.Status -ne 'Fresh scan / offline' -or $offlinePresentation.WinRMHttpOpen) {
+    throw 'A saved target absent from a completed fresh scan is not presented as offline.'
+}
+if ($onlinePresentation.Status -ne 'Fresh scan / WinRMReady' -or -not $onlinePresentation.WinRMHttpOpen -or $onlinePresentation.ValidationStatus -ne 'NotChecked') {
+    throw 'A freshly discovered saved target does not retain online evidence independently from selected-target validation.'
+}
+$selectorFunction = $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Select-WinRMDiscoveryTarget'
+}, $true) | Select-Object -First 1
+if ($selectorFunction.Extent.Text -match 'Get-DiskHealthWinRMComputers' -or $selectorFunction.Extent.Text -notmatch 'Scan network for more PCs') {
+    throw 'The selector must render without an implicit scan and expose explicit network scanning.'
+}
+if ($source -notmatch 'if\s*\(\$Discover\)[\s\S]{0,900}Get-DiskHealthWinRMComputers') {
+    throw 'The explicit -Discover automation flag no longer starts full discovery.'
 }
 
 $driveMenuFunction = $ast.FindAll({
@@ -110,13 +163,20 @@ if ($safeMenuText.Length -gt $expectedMaximum -or -not $safeMenuText.EndsWith('.
 Test-ModuleManifest -Path $manifest -ErrorAction Stop | Out-Null
 Import-Module -Name $manifest -Force -ErrorAction Stop
 $module = Test-ModuleManifest -Path $manifest -ErrorAction Stop
-if ($module.Version -lt [version]'1.1.0') {
-    throw "Vendored WinRMDiscovery module must be at least 1.1.0; found $($module.Version)."
+if ($module.Version -lt [version]'1.4.0') {
+    throw "Vendored WinRMDiscovery module must be at least 1.4.0; found $($module.Version)."
+}
+$resolverCommand = Get-Command Resolve-WinRMHistoryTargetAddress -ErrorAction Stop
+if (-not $resolverCommand.Parameters.ContainsKey('IncludeDiagnostics')) {
+    throw 'Vendored history resolver does not expose canonical structured diagnostics.'
 }
 foreach ($requiredExport in @(
     'Find-WinRMComputer'
     'Get-WinRMConnectionHistory'
     'Add-WinRMConnectionHistoryEntry'
+    'Get-WinRMTargetCatalog'
+    'Get-WinRMDiscoverySnapshot'
+    'Save-WinRMDiscoverySnapshot'
     'Resolve-WinRMHistoryTargetAddress'
 )) {
     if (-not (Get-Command $requiredExport -ErrorAction SilentlyContinue)) {

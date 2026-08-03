@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.7] - 2026-08-03
+
+### Changed
+- Kept selected-target validation separate from fresh discovery reachability: saved rows now show `WinRMReady` or offline after an explicit completed scan instead of suppressing their cached port evidence as `Saved / not checked`.
+- Synced canonical `WinRMDiscovery` 1.4.0 and replaced pre-menu bulk history validation with a local-only saved/recent target catalog. Saved rows are `not checked` until selected; full LAN scan is always explicit and its TTL-bound results remain separate from successful-connection history.
+- Empty history no longer triggers an automatic scan, and selecting **Scan network for more PCs** refreshes the snapshot while retaining saved targets even when the scan returns no rows.
+- Synced canonical `WinRMDiscovery` 1.3.0 and forwarded its sanitized saved-target sub-stage diagnostics into the existing correlated DiskHealth performance log.
+- Saved-target resolution now fast-paths corroborated last-IP/MAC evidence, uses 500 ms TCP 5985 probes, and hard-bounds the Windows system name resolver to 1000 ms instead of paying two sequential negative hostname lookups.
+- Full LAN discovery no longer serializes reverse-DNS misses in the foreground; unresolved friendly names remain selectable by IP while the existing background resolver updates the network-scoped cache. Menu refresh, snapshot and hotkey policy did not change.
+
+### Performance
+- On the current two-entry history, the same parallel result set (one resolved, one unresolved) fell from `8.77 s` to `2.01 s` (`77.1%` reduction, `4.37x` faster). The online entry fell from `0.74 s` to `0.41 s`; the stale entry fell from `8.77 s` to `1.94 s`.
+- Historical full-scan evidence attributed `19.5–19.8 s` of the `22–23 s` slow path to serialized reverse-DNS fallback. That loop is now outside the foreground path; three current live LAN samples completed in `3.47–4.50 s` (average `3.86 s`), with foreground reverse DNS at `0–0.1 ms` and the deliberate WS-Discovery window now the largest stage.
+
+### Tests
+- Added integration guards for no initial scan/bulk resolution, canonical selected-target validation, catalog sub-stage forwarding and `WinRMDiscovery` 1.4.0 exports.
+- Added canonical history-resolution schema, failure/timeout, default-return compatibility and target/secret-absence guards, plus DiskHealth integration guards for canonical sub-stage forwarding and WinRMDiscovery 1.3.0.
+
+## [1.24.6] - 2026-07-31
+
+### Changed
+- ATA SSD collection now requests only the standardized Solid State Device Statistics page (`smartctl -l ssd`) in addition to the existing SMART report. Valid page-7 `Percentage Used Endurance` is preferred over model-specific wear mappings, expanding remaining-life coverage without a full `smartctl -x` query.
+- Remaining-life resolution now automatically uses valid ATA page 7, matched smartmontools database evidence, verified controller mappings, or an internal non-USB Windows Storage `Wear` fallback. The report exposes the binary result `SUPPORTED`/`UNSUPPORTED`; missing evidence no longer appears as `GOOD (N/A)` and never becomes zero.
+- Vendor/controller profiles continue to own proprietary attribute names, counter units, and warning semantics. Unknown units remain visible raw and are reported as unsupported instead of being guessed.
+
+### Fixed
+- A live `ADATA SSD DM900 256GB-DL4 / R0427ANR`, absent from smartmontools 7.5 `drivedb.h`, now resolves `53% used` to `Life 47%` instead of `GOOD (N/A)`. Smartctl and openSeaChest independently returned the same standardized ATA value.
+- Extended Silicon Motion family detection for the SM2258 layout using its full attribute signature rather than an exact model name. `F1/F2/F5` now produce Host Reads, Host Writes, NAND Writes, and lifetime WAF; the live DM900 report matched CrystalDiskInfo and Hard Disk Sentinel at roughly `31,443 / 43,149 / 213,487 GiB` and `4.95x`.
+- Rejected the DM900's nominally valid ATA page-1 host-sector totals as a transfer-total source after they contradicted the controller counters and both reference tools by orders of magnitude.
+- Corrected SanDisk/WD `F1/F2` lifetime totals from an invalid direct-GiB interpretation to `Total LBAs x reported logical block size`. A live SanDisk X600 at `192.168.1.243` now reports about `14.84 TiB` Host Writes and `26.29 TiB` Host Reads instead of impossible multi-petabyte values; conversion remains unsupported if sector size is unavailable.
+- Reconciled the X600's valid ATA page-7 `96%` remaining life with its normalized `0xEE=94%` vendor metric by reporting the conservative `Life 94%` while preserving both readings in the source text. CrystalDiskInfo and Hard Disk Sentinel also report 94%; their shared SanDisk interpretation is corroborating vendor logic, not an independent standard counter.
+- Rejected standalone Windows Storage `Wear=0` as ambiguous because the X600 driver returned zero despite independently proven 4–6% wear; it can no longer create an invented 100% fallback result.
+
+### Performance
+- Five-run live timings on the DM900 averaged `134.0 ms` for `smartctl -a -l ssd` versus `217.4 ms` for `-a` with a cold first sample; warm samples showed only a small page-7 cost. The broader `-x` path was not adopted.
+
+### Tests
+- Added regression coverage for valid/invalid page-7 telemetry, matched/unmatched database evidence, Windows wear fallback, binary unsupported behavior, endurance beyond 100%, SM2258 family detection, exact lifetime-total/WAF conversion, SanDisk LBA conversion with mandatory logical block size, and native arguments for direct ATA, NVMe, and bridge paths.
+
+## [1.24.5] - 2026-07-30
+
+### Changed
+- Replaced the legacy per-line `-Benchmark` text output with one correlated JSONL run and a duration-sorted summary under Git-ignored `diagnostic_reports\performance`. Normal interactive Network runs enable the same diagnostics automatically and render the current stage plus elapsed time through single-frame TUI updates.
+- Added timings for saved history, every canonical LAN source, target-menu construction/first frame, exact-target preparation, DPAPI, TCP/PSSession attempts, remote prerequisites, CIM/WMI/Storage/PnP, every smartctl query/retry, health evaluation and report rendering.
+- Resolved network-scoped saved targets concurrently through the exported canonical `Resolve-WinRMHistoryTargetAddress`; no resolver logic, evidence rule or timeout changed.
+
+### Performance
+- On the measured 7-entry history (2 reachable, 5 stale), the Network-to-target-list path fell from `44.61 s` to `11.55 s` (`74.1%` reduction, `3.86x` faster) while preserving the same resolved/unresolved result set.
+- A read-only full scan of `192.168.1.65` completed in `9.88 s` with zero failed/timeout stages; the largest collection costs were `Get-PhysicalDisk` (`2.56 s`) and `Win32_DiskDrive` (`1.12 s`).
+
+### Tests
+- Added structured-schema, monotonic-duration, timeout/failure, sorted-summary and secret-absence regression coverage.
+
+## [1.24.4] - 2026-07-30
+
+### Fixed
+- Added an exact `KingstonUV400` telemetry profile from Kingston's published SUV400S37 SMART contract. `0xE7 Current` is now the trusted remaining-life value (`80%` on the live 120 GB sample) instead of the unrelated raw value (`20`).
+- Removed the false `CAUTION` caused by globally interpreting `0xB7 raw=106` as runtime bad blocks. Undocumented/vendor-specific IDs remain visible but are warning indicators only for profiles with supporting evidence.
+- Profile-scoped the table coloring and raw-warning checks so Samsung `0xB7`, Silicon Motion `0xB2`, and vendor program/erase counters do not leak into unrelated SSD layouts.
+
+### Tests
+- Added the live `KINGSTON SUV400S37120G / 0C3J96R9` regression fixture from `192.168.1.65`, covering normalized `0xE7`, opaque `0xB7`, and preserved profile-specific warning behavior.
+
 ## [1.24.3] - 2026-07-30
 
 ### Changed

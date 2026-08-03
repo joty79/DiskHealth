@@ -19,7 +19,7 @@
 .PARAMETER DiscoveryStateRoot
     Προαιρετικό absolute path για network-scoped discovery history/cache.
 .PARAMETER Benchmark
-    Καταγράφει discovery, WinRM και storage-probe phase timings στο local DiskHealth state folder.
+    Καταγράφει structured discovery, WinRM, collector και rendering timings στο Git-ignored diagnostic_reports\performance.
 #>
 [CmdletBinding()]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingInvokeExpression', '', Justification = 'Loads the pinned canonical PowerShell TUI blueprint into script scope so its state and ANSI palette are shared by DiskHealth.')]
@@ -51,8 +51,14 @@ param(
     [Parameter(DontShow)]
     [switch]$EmbeddedRemote,
     [Parameter(DontShow)]
-    [switch]$CredentialFromSavedProfile
+    [switch]$CredentialFromSavedProfile,
+    [Parameter(DontShow)]
+    [AllowNull()]
+    $PerformanceContext
 )
+
+$script:DiskHealthInvocationStartUtc = [datetime]::UtcNow
+$script:DiskHealthInvocationWatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 # 1. Καθορισμός Χρωμάτων (Console Colors)
 $Cyan = "Cyan"
@@ -61,7 +67,8 @@ $Red = "Red"
 $Green = "Green"
 $White = "White"
 $Gray = "DarkGray"
-$script:DiskHealthBenchmarkEnabled = [bool]$Benchmark
+$script:DiskHealthPerformanceContext = $PerformanceContext
+$script:DiskHealthBenchmarkEnabled = [bool]$Benchmark -or $null -ne $PerformanceContext
 $script:DiskHealthBenchmarkLogPath = ""
 $script:IsHomeLauncher = (
     -not $PSBoundParameters.ContainsKey('ComputerName') -and
@@ -81,6 +88,12 @@ if ($diskHealthActualTuiHash -ne $diskHealthExpectedTuiHash) {
     throw "⚠️⚠️⚠️ TUI DRIFT: Expected=$diskHealthExpectedTuiHash Actual=$diskHealthActualTuiHash"
 }
 Invoke-Expression (Get-Content -Raw -LiteralPath $diskHealthTuiBlueprintPath)
+$script:DiskHealthInvocationWatch.Stop()
+$script:DiskHealthInvocationMetric = [PSCustomObject]@{
+    StartUtc   = $script:DiskHealthInvocationStartUtc
+    EndUtc     = [datetime]::UtcNow
+    DurationMs = $script:DiskHealthInvocationWatch.Elapsed.TotalMilliseconds
+}
 
 function Get-DiskHealthLocalStateRoot {
     param(
@@ -144,6 +157,123 @@ function Remove-DiskHealthStoredCredential {
         -Confirm:$false
 }
 
+function New-DiskHealthPerformanceContext {
+    $logRoot = Join-Path -Path $PSScriptRoot -ChildPath 'diagnostic_reports\performance'
+    $null = New-Item -ItemType Directory -Path $logRoot -Force -ErrorAction Stop
+    $runId = [guid]::NewGuid().ToString('N')
+    $stamp = [datetime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
+    $context = [PSCustomObject]@{
+        RunId       = $runId
+        StartedUtc  = [datetime]::UtcNow
+        Watch       = [System.Diagnostics.Stopwatch]::StartNew()
+        Records     = [System.Collections.Generic.List[object]]::new()
+        NextSequence = 0
+        LogPath     = Join-Path -Path $logRoot -ChildPath "performance_${stamp}_${runId}.jsonl"
+        SummaryPath = Join-Path -Path $logRoot -ChildPath "performance_${stamp}_${runId}_summary.txt"
+        Finalized   = $false
+    }
+    return $context
+}
+
+function Add-DiskHealthPerformanceRecord {
+    param(
+        [Parameter(Mandatory)][string]$Stage,
+        [AllowEmptyString()][string]$ParentStage = '',
+        [Parameter(Mandatory)][datetime]$StartUtc,
+        [Parameter(Mandatory)][datetime]$EndUtc,
+        [Parameter(Mandatory)][double]$DurationMs,
+        [ValidateSet('success', 'failure', 'timeout', 'skipped')][string]$Status = 'success',
+        [AllowNull()]$AttemptCount = $null,
+        [AllowNull()]$ResultCount = $null,
+        [AllowEmptyString()][string]$ErrorCategory = ''
+    )
+
+    $context = $script:DiskHealthPerformanceContext
+    if ($null -eq $context) { return }
+    $safeCategory = if ([string]::IsNullOrWhiteSpace($ErrorCategory)) {
+        ''
+    } else {
+        ([string]$ErrorCategory -replace '[^A-Za-z0-9_.-]', '').Substring(0, [Math]::Min(64, ([string]$ErrorCategory -replace '[^A-Za-z0-9_.-]', '').Length))
+    }
+    $context.NextSequence = [int]$context.NextSequence + 1
+    $context.Records.Add([PSCustomObject][ordered]@{
+        SchemaVersion = 1
+        RunId = [string]$context.RunId
+        Sequence = [int]$context.NextSequence
+        Stage = $Stage
+        ParentStage = $ParentStage
+        StartUtc = $StartUtc.ToUniversalTime().ToString('o')
+        EndUtc = $EndUtc.ToUniversalTime().ToString('o')
+        DurationMs = [Math]::Round([Math]::Max(0, $DurationMs), 3)
+        Status = $Status
+        AttemptCount = $AttemptCount
+        ResultCount = $ResultCount
+        ErrorCategory = $safeCategory
+    })
+}
+
+function Start-DiskHealthPerformanceStage {
+    param(
+        [Parameter(Mandatory)][string]$Stage,
+        [AllowEmptyString()][string]$ParentStage = ''
+    )
+
+    if ($null -eq $script:DiskHealthPerformanceContext) { return $null }
+    return [PSCustomObject]@{
+        Stage       = $Stage
+        ParentStage = $ParentStage
+        StartUtc    = [datetime]::UtcNow
+        Watch       = [System.Diagnostics.Stopwatch]::StartNew()
+    }
+}
+
+function Complete-DiskHealthPerformanceStage {
+    param(
+        [AllowNull()]$Token,
+        [ValidateSet('success', 'failure', 'timeout', 'skipped')][string]$Status = 'success',
+        [AllowNull()]$AttemptCount = $null,
+        [AllowNull()]$ResultCount = $null,
+        [AllowEmptyString()][string]$ErrorCategory = ''
+    )
+
+    if ($null -eq $Token -or $null -eq $script:DiskHealthPerformanceContext) { return }
+    $Token.Watch.Stop()
+    Add-DiskHealthPerformanceRecord `
+        -Stage $Token.Stage `
+        -ParentStage $Token.ParentStage `
+        -StartUtc $Token.StartUtc `
+        -EndUtc ([datetime]::UtcNow) `
+        -DurationMs $Token.Watch.Elapsed.TotalMilliseconds `
+        -Status $Status `
+        -AttemptCount $AttemptCount `
+        -ResultCount $ResultCount `
+        -ErrorCategory $ErrorCategory
+}
+
+function Get-DiskHealthPerformanceErrorCategory {
+    param([AllowNull()]$ErrorObject)
+
+    if ($null -eq $ErrorObject) { return '' }
+    try {
+        if (Get-Command Get-WinRMConnectionErrorCategory -ErrorAction SilentlyContinue) {
+            $category = Get-WinRMConnectionErrorCategory -ErrorObject $ErrorObject
+            if (-not [string]::IsNullOrWhiteSpace($category) -and $category -ne 'Unknown') { return $category }
+        }
+    } catch {}
+    $exception = if ($ErrorObject -is [System.Management.Automation.ErrorRecord]) {
+        $ErrorObject.Exception
+    } elseif ($ErrorObject.PSObject.Properties['Exception']) {
+        $ErrorObject.Exception
+    } else {
+        $ErrorObject
+    }
+    if ($exception -is [System.TimeoutException]) { return 'Timeout' }
+    if ($exception -is [System.UnauthorizedAccessException]) { return 'PermissionDenied' }
+    if ($exception -is [System.OperationCanceledException]) { return 'Canceled' }
+    $typeName = if ($null -ne $exception) { $exception.GetType().Name } else { 'Unknown' }
+    return ($typeName -replace 'Exception$', '')
+}
+
 function Write-DiskHealthBenchmarkLine {
     param(
         [Parameter(Mandatory)][string]$Phase,
@@ -151,76 +281,224 @@ function Write-DiskHealthBenchmarkLine {
         [AllowEmptyString()][string]$Details = ''
     )
 
-    if (-not $script:DiskHealthBenchmarkEnabled) { return }
-    if ([string]::IsNullOrWhiteSpace($script:DiskHealthBenchmarkLogPath)) {
-        $logRoot = Join-Path -Path (Get-DiskHealthLocalStateRoot) -ChildPath 'logs'
-        $null = New-Item -ItemType Directory -Path $logRoot -Force
-        $stamp = Get-Date -Format 'yyyy-MM-dd_HHmmss_fff'
-        $script:DiskHealthBenchmarkLogPath = Join-Path -Path $logRoot -ChildPath "probe_benchmark_${stamp}_$PID.log"
-        "[DiskHealth Benchmark] $(Get-Date -Format 'o')" | Set-Content -LiteralPath $script:DiskHealthBenchmarkLogPath -Encoding UTF8
+    if (-not $script:DiskHealthBenchmarkEnabled -or $null -eq $script:DiskHealthPerformanceContext) { return }
+    $endUtc = [datetime]::UtcNow
+    $parentStage = if ($Phase -like 'Collector.*') { 'Collector.Total' } elseif ($Phase -like 'WinRM.*') { 'WinRM.Total' } elseif ($Phase -like 'Discovery.*') { 'Network.Discovery' } else { '' }
+    Add-DiskHealthPerformanceRecord `
+        -Stage $Phase `
+        -ParentStage $parentStage `
+        -StartUtc $endUtc.AddMilliseconds(-[Math]::Max(0, $Milliseconds)) `
+        -EndUtc $endUtc `
+        -DurationMs $Milliseconds
+}
+
+function Save-DiskHealthPerformanceReport {
+    param([switch]$Finalize, [switch]$ShowSummary)
+
+    $context = $script:DiskHealthPerformanceContext
+    if ($null -eq $context) { return }
+    if ($Finalize -and -not $context.Finalized) {
+        $context.Watch.Stop()
+        Add-DiskHealthPerformanceRecord `
+            -Stage 'Run.Total' `
+            -StartUtc $context.StartedUtc `
+            -EndUtc ([datetime]::UtcNow) `
+            -DurationMs $context.Watch.Elapsed.TotalMilliseconds `
+            -Status 'success' `
+            -ResultCount $context.Records.Count
+        $context.Finalized = $true
     }
 
-    $detailSuffix = if ([string]::IsNullOrWhiteSpace($Details)) { '' } else { " | $Details" }
-    "{0,-34} {1,10:N1} ms{2}" -f $Phase, $Milliseconds, $detailSuffix |
-        Add-Content -LiteralPath $script:DiskHealthBenchmarkLogPath -Encoding UTF8
+    $jsonLines = @($context.Records | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 4 })
+    $jsonLines | Set-Content -LiteralPath $context.LogPath -Encoding UTF8
+    $totalMs = if ($context.Finalized) { [double]$context.Watch.Elapsed.TotalMilliseconds } else { [double]$context.Watch.Elapsed.TotalMilliseconds }
+    $summary = [System.Collections.Generic.List[string]]::new()
+    $summary.Add("DiskHealth performance summary | Run $($context.RunId)")
+    $summary.Add("Total: $([Math]::Round($totalMs, 1)) ms | Records: $($context.Records.Count)")
+    $summary.Add('')
+    $summary.Add(('{0,-46} {1,11} {2,8} {3,-8}' -f 'Stage', 'Duration', 'Percent', 'Status'))
+    foreach ($row in @($context.Records | Where-Object { $_.Stage -ne 'Run.Total' } | Sort-Object DurationMs -Descending)) {
+        $percent = if ($totalMs -gt 0) { 100.0 * [double]$row.DurationMs / $totalMs } else { 0 }
+        $stageText = if ([string]::IsNullOrWhiteSpace($row.ParentStage)) { $row.Stage } else { "$($row.ParentStage) > $($row.Stage)" }
+        if ($stageText.Length -gt 46) { $stageText = $stageText.Substring(0, 43) + '...' }
+        $summary.Add(('{0,-46} {1,9:N1}ms {2,7:N1}% {3,-8}' -f $stageText, $row.DurationMs, $percent, $row.Status))
+    }
+    $summary.Add('')
+    $summary.Add("Structured log: $($context.LogPath)")
+    $summary | Set-Content -LiteralPath $context.SummaryPath -Encoding UTF8
+    $script:DiskHealthBenchmarkLogPath = $context.LogPath
+    if ($ShowSummary) {
+        [Console]::WriteLine(($summary -join [Environment]::NewLine))
+    }
+}
+
+function Show-DiskHealthPerformanceProgress {
+    param(
+        [Parameter(Mandatory)][string]$Stage,
+        [AllowEmptyString()][string]$Message = '',
+        [switch]$ForceClear
+    )
+
+    if ($null -eq $script:DiskHealthPerformanceContext) { return }
+    $elapsedSeconds = $script:DiskHealthPerformanceContext.Watch.Elapsed.TotalSeconds
+    if ($NoUI -or [Console]::IsOutputRedirected) {
+        [Console]::WriteLine("[DiskHealth] $Stage | elapsed $($elapsedSeconds.ToString('N1'))s")
+        return
+    }
+    try {
+        $width = Get-UiWidth
+        $frame = New-UiFrame
+        Add-UiFrameBanner -Frame $frame -Title '💾 DISKHEALTH PERFORMANCE' -Subtitle "Run $($script:DiskHealthPerformanceContext.RunId.Substring(0, 8))" -Width $width
+        Add-UiFrameLine -Frame $frame
+        Add-UiFrameLine -Frame $frame -Text "$($_C.H1)  Stage: $Stage$($_C.Reset)$($_C.EraseLn)"
+        Add-UiFrameLine -Frame $frame -Text "$($_C.Dim)  Elapsed: $($elapsedSeconds.ToString('N1')) s$($_C.Reset)$($_C.EraseLn)"
+        if (-not [string]::IsNullOrWhiteSpace($Message)) {
+            Add-UiFrameLine -Frame $frame -Text "$($_C.Dim)  $Message$($_C.Reset)$($_C.EraseLn)"
+        }
+        Add-UiFrameLine -Frame $frame
+        Add-UiFrameLine -Frame $frame -Text "$($_C.Dim)  Please wait. Current stage is still active.$($_C.Reset)$($_C.EraseLn)"
+        Write-UiFrame -Frame $frame -ForceClear:$ForceClear
+    } catch {
+        [Console]::WriteLine("[DiskHealth] $Stage | elapsed $($elapsedSeconds.ToString('N1'))s")
+    }
+}
+
+function Initialize-DiskHealthPerformance {
+    if ($null -eq $script:DiskHealthPerformanceContext) {
+        $script:DiskHealthPerformanceContext = New-DiskHealthPerformanceContext
+    }
+    $script:DiskHealthBenchmarkEnabled = $true
+    if ($null -ne $script:DiskHealthInvocationMetric) {
+        Add-DiskHealthPerformanceRecord `
+            -Stage 'Initialization.TUIAsset' `
+            -ParentStage 'Initialization' `
+            -StartUtc $script:DiskHealthInvocationMetric.StartUtc `
+            -EndUtc $script:DiskHealthInvocationMetric.EndUtc `
+            -DurationMs $script:DiskHealthInvocationMetric.DurationMs `
+            -Status 'success' `
+            -ResultCount 1
+        $script:DiskHealthInvocationMetric = $null
+    }
+}
+
+if ($Benchmark -or $null -ne $PerformanceContext) {
+    Initialize-DiskHealthPerformance
 }
 
 function Import-DiskHealthWinRMDiscovery {
     param([AllowEmptyString()][string]$StateRoot = '')
 
+    $stageToken = Start-DiskHealthPerformanceStage -Stage 'Initialization.WinRMDiscovery' -ParentStage 'Initialization'
+    $alreadyLoaded = $null -ne (Get-Module -Name WinRMDiscovery)
     $manifest = Join-Path -Path $PSScriptRoot -ChildPath '.assets\WinRMDiscovery\WinRMDiscovery.psd1'
-    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
-        throw "Το WinRMDiscovery module δεν βρέθηκε: $manifest"
-    }
+    try {
+        if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+            throw "Το WinRMDiscovery module δεν βρέθηκε: $manifest"
+        }
 
-    if (-not (Get-Module -Name WinRMDiscovery)) {
-        Import-Module -Name $manifest -Force -ErrorAction Stop
-    }
-    if (-not [string]::IsNullOrWhiteSpace($StateRoot)) {
-        Set-WinRMDiscoveryStateRoot -Path $StateRoot
+        if (-not $alreadyLoaded) {
+            Import-Module -Name $manifest -Force -ErrorAction Stop
+        }
+        if (-not [string]::IsNullOrWhiteSpace($StateRoot)) {
+            Set-WinRMDiscoveryStateRoot -Path $StateRoot
+        }
+        Complete-DiskHealthPerformanceStage -Token $stageToken -Status $(if ($alreadyLoaded) { 'skipped' } else { 'success' }) -ResultCount 1
+    } catch {
+        Complete-DiskHealthPerformanceStage -Token $stageToken -Status failure -ErrorCategory (Get-DiskHealthPerformanceErrorCategory $_)
+        throw
     }
 }
 
 function Import-DiskHealthWinRMConnection {
+    $stageToken = Start-DiskHealthPerformanceStage -Stage 'Initialization.WinRMConnection' -ParentStage 'Initialization'
+    $alreadyLoaded = $null -ne (Get-Module -Name WinRMConnection)
     $manifest = Join-Path -Path $PSScriptRoot -ChildPath '.assets\WinRMConnection\WinRMConnection.psd1'
-    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
-        throw "Το WinRMConnection module δεν βρέθηκε: $manifest"
-    }
+    try {
+        if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+            throw "Το WinRMConnection module δεν βρέθηκε: $manifest"
+        }
 
-    if (-not (Get-Module -Name WinRMConnection)) {
-        Import-Module -Name $manifest -Force -ErrorAction Stop
+        if (-not $alreadyLoaded) {
+            Import-Module -Name $manifest -Force -ErrorAction Stop
+        }
+        Complete-DiskHealthPerformanceStage -Token $stageToken -Status $(if ($alreadyLoaded) { 'skipped' } else { 'success' }) -ResultCount 1
+    } catch {
+        Complete-DiskHealthPerformanceStage -Token $stageToken -Status failure -ErrorCategory (Get-DiskHealthPerformanceErrorCategory $_)
+        throw
     }
 }
 
 function Import-DiskHealthWinRMWorkshop {
+    $stageToken = Start-DiskHealthPerformanceStage -Stage 'Initialization.WinRMWorkshop' -ParentStage 'Initialization'
+    $alreadyLoaded = $null -ne (Get-Module -Name WinRMWorkshop)
     $manifest = Join-Path -Path $PSScriptRoot -ChildPath '.assets\WinRMWorkshop\WinRMWorkshop.psd1'
-    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
-        throw "Το WinRMWorkshop module δεν βρέθηκε: $manifest"
-    }
+    try {
+        if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+            throw "Το WinRMWorkshop module δεν βρέθηκε: $manifest"
+        }
 
-    if (-not (Get-Module -Name WinRMWorkshop)) {
-        Import-Module -Name $manifest -Force -ErrorAction Stop
+        if (-not $alreadyLoaded) {
+            Import-Module -Name $manifest -Force -ErrorAction Stop
+        }
+        Complete-DiskHealthPerformanceStage -Token $stageToken -Status $(if ($alreadyLoaded) { 'skipped' } else { 'success' }) -ResultCount 1
+    } catch {
+        Complete-DiskHealthPerformanceStage -Token $stageToken -Status failure -ErrorCategory (Get-DiskHealthPerformanceErrorCategory $_)
+        throw
     }
 }
 
 function Write-DiskHealthWinRMWorkshopStatus {
     param([Parameter(Mandatory)]$Status)
 
-    $statusColor = if ($Status.State -eq 'Ready') { $Green } else { $Cyan }
-    Write-Host "  🔐 $($Status.Message)" -ForegroundColor $statusColor
+    if ($null -eq $script:DiskHealthPerformanceContext) {
+        $statusColor = if ($Status.State -eq 'Ready') { $Green } else { $Cyan }
+        Write-Host "  🔐 $($Status.Message)" -ForegroundColor $statusColor
+        return
+    }
+    Show-DiskHealthPerformanceProgress -Stage "TrustedHosts.$($Status.State)" -Message 'Exact-target preparation; no wildcard entries.'
 }
 
 function Write-DiskHealthWinRMConnectionStatus {
     param([Parameter(Mandatory)]$Status)
 
-    $statusColor = if ($Status.State -in @('AttemptFailed', 'Failed')) {
-        $Yellow
-    } elseif ($Status.State -eq 'Connected') {
-        $Green
-    } else {
-        $Cyan
+    if ($null -eq $script:DiskHealthPerformanceContext) {
+        $statusColor = if ($Status.State -in @('AttemptFailed', 'Failed')) { $Yellow } elseif ($Status.State -eq 'Connected') { $Green } else { $Cyan }
+        Write-Host "  🔌 $($Status.Message)" -ForegroundColor $statusColor
+        return
     }
-    Write-Host "  🔌 $($Status.Message)" -ForegroundColor $statusColor
+    if ($null -eq $script:DiskHealthConnectionStageTokens) {
+        $script:DiskHealthConnectionStageTokens = @{}
+    }
+    $attempt = [int]$Status.Attempt
+    $probeKey = "Tcp.$attempt"
+    $sessionKey = "Session.$attempt"
+    switch ([string]$Status.State) {
+        'TcpProbe' {
+            $script:DiskHealthConnectionStageTokens[$probeKey] = Start-DiskHealthPerformanceStage -Stage "WinRM.TcpPreflight.Attempt$attempt" -ParentStage 'WinRM.Connect'
+        }
+        'Connecting' {
+            if ($script:DiskHealthConnectionStageTokens.ContainsKey($probeKey)) {
+                Complete-DiskHealthPerformanceStage -Token $script:DiskHealthConnectionStageTokens[$probeKey] -Status success -AttemptCount $attempt -ResultCount 1
+                $script:DiskHealthConnectionStageTokens.Remove($probeKey)
+            }
+            $script:DiskHealthConnectionStageTokens[$sessionKey] = Start-DiskHealthPerformanceStage -Stage "WinRM.PSSession.Attempt$attempt" -ParentStage 'WinRM.Connect'
+        }
+        'AttemptFailed' {
+            $activeKey = if ($script:DiskHealthConnectionStageTokens.ContainsKey($sessionKey)) { $sessionKey } else { $probeKey }
+            if ($script:DiskHealthConnectionStageTokens.ContainsKey($activeKey)) {
+                $failedStatus = if ([string]$Status.Category -eq 'Timeout') { 'timeout' } else { 'failure' }
+                Complete-DiskHealthPerformanceStage -Token $script:DiskHealthConnectionStageTokens[$activeKey] -Status $failedStatus -AttemptCount $attempt -ResultCount 0 -ErrorCategory ([string]$Status.Category)
+                $script:DiskHealthConnectionStageTokens.Remove($activeKey)
+            }
+        }
+        'Connected' {
+            if ($script:DiskHealthConnectionStageTokens.ContainsKey($sessionKey)) {
+                Complete-DiskHealthPerformanceStage -Token $script:DiskHealthConnectionStageTokens[$sessionKey] -Status success -AttemptCount $attempt -ResultCount 1
+                $script:DiskHealthConnectionStageTokens.Remove($sessionKey)
+            }
+        }
+    }
+    Show-DiskHealthPerformanceProgress -Stage "WinRM.$($Status.State)" -Message "Bounded attempt $attempt/$($Status.MaxAttempts)."
 }
 
 function Get-MenuDisplayText {
@@ -244,10 +522,13 @@ function Show-DiskHealthChoiceMenu {
         [int]$DefaultIndex = 0,
         [AllowNull()]$EscapeValue = $null,
         [ValidateSet('Back', 'Exit')][string]$EscapeMode = 'Back',
+        [AllowEmptyString()][string]$PerformanceStage = '',
+        [AllowEmptyString()][string]$PerformanceParentStage = '',
         [Parameter(DontShow)][AllowNull()][scriptblock]$ReadKey
     )
 
     if ($Options.Count -eq 0) { return $EscapeValue }
+    $firstFrameToken = if ([string]::IsNullOrWhiteSpace($PerformanceStage)) { $null } else { Start-DiskHealthPerformanceStage -Stage $PerformanceStage -ParentStage $PerformanceParentStage }
     $selectedIndex = [Math]::Max(0, [Math]::Min($DefaultIndex, $Options.Count - 1))
     Initialize-TuiHost
     try {
@@ -292,6 +573,10 @@ function Show-DiskHealthChoiceMenu {
             Add-UiFrameLine -Frame $frame
             Add-UiFrameNavFooter -Frame $frame -Mode $EscapeMode -Width $width
             Write-UiFrame -Frame $frame
+            if ($null -ne $firstFrameToken) {
+                Complete-DiskHealthPerformanceStage -Token $firstFrameToken -Status success -ResultCount $Options.Count
+                $firstFrameToken = $null
+            }
 
             $key = if ($null -ne $ReadKey) { & $ReadKey } else { Read-ConsoleKey }
             $keyName = [string]$key.Key
@@ -345,61 +630,277 @@ function Show-SmartctlInstallMenu {
     return $choice.Action
 }
 
+function Add-DiskHealthDiscoveryDiagnostics {
+    param(
+        [AllowNull()][string[]]$Diagnostics,
+        [AllowNull()]$ScanToken
+    )
+
+    if ($null -eq $script:DiskHealthPerformanceContext) { return }
+    $phaseMap = @{
+        'Ifaces'  = 'Discovery.NetworkInterfaces'
+        'DNS'     = 'Discovery.SavedNameResolution'
+        'ArpClr'  = 'Discovery.NeighborCacheRefresh'
+        'Ping'    = 'Discovery.PingSweep'
+        'WS-Disc' = 'Discovery.WSDiscovery'
+        'PCPort'  = 'Discovery.ComputerPortSweep'
+        'Neighbr' = 'Discovery.NeighborMerge'
+        'TCPScan' = 'Discovery.Tcp5985And445Probe'
+        'Reverse' = 'Discovery.DNSNetBIOSFallbacks'
+        'RevCache' = 'Discovery.NameResolution.Cache'
+        'RevAsync' = 'Discovery.NameResolution.AsyncReverseDns'
+        'RevDNS'   = 'Discovery.NameResolution.ForegroundDnsFallback'
+        'NetBIOS'  = 'Discovery.NameResolution.NetBIOS'
+        'BgQueue'  = 'Discovery.NameResolution.BackgroundQueue'
+        'Result'   = 'Discovery.NameResolution.ResultBuild'
+        'MACMap'   = 'Discovery.NameResolution.MacMap'
+    }
+    foreach ($line in @($Diagnostics)) {
+        if ($line -notmatch '^\s*Phase\s+\S+\s+\((?<Name>[^)]+)\)\s*:\s*(?<Ms>[0-9.,]+)\s*ms(?:\s*\((?<Count>\d+)\s+hosts\))?') { continue }
+        $phaseName = [string]$Matches.Name
+        if (-not $phaseMap.ContainsKey($phaseName)) { continue }
+        $milliseconds = [double]::Parse(($Matches.Ms -replace ',', '.'), [Globalization.CultureInfo]::InvariantCulture)
+        $endUtc = [datetime]::UtcNow
+        $resultCount = if ([string]::IsNullOrWhiteSpace([string]$Matches['Count'])) { $null } else { [int]$Matches['Count'] }
+        Add-DiskHealthPerformanceRecord `
+            -Stage $phaseMap[$phaseName] `
+            -ParentStage 'Discovery.FullScan' `
+            -StartUtc $endUtc.AddMilliseconds(-$milliseconds) `
+            -EndUtc $endUtc `
+            -DurationMs $milliseconds `
+            -Status success `
+            -ResultCount $resultCount
+    }
+}
+
 function Get-DiskHealthWinRMComputers {
-    param([string]$StateRoot = '')
+    param(
+        [string]$StateRoot = '',
+        [AllowEmptyString()][string]$NetworkId = ''
+    )
 
     Import-DiskHealthWinRMDiscovery -StateRoot $StateRoot
-    Write-Host "  🔎 Αναζήτηση Windows PCs στο τοπικό δίκτυο..." -ForegroundColor Cyan
-    $scanWatch = [System.Diagnostics.Stopwatch]::StartNew()
-    $computers = @(Find-WinRMComputer -StateRoot $StateRoot -IncludeDiagnostics:$Benchmark)
-    $scanWatch.Stop()
-    Write-DiskHealthBenchmarkLine -Phase 'Discovery.FullScan' -Milliseconds $scanWatch.Elapsed.TotalMilliseconds -Details "$($computers.Count) PCs"
-    if ($Benchmark) {
-        foreach ($diagnosticLine in @(Get-WinRMDiscoveryDiagnostics)) {
-            Write-DiskHealthBenchmarkLine -Phase 'Discovery.ModuleDetail' -Milliseconds 0 -Details ([string]$diagnosticLine)
+    Show-DiskHealthPerformanceProgress -Stage 'Discovery.FullScan' -Message 'Canonical LAN sources are running.'
+    $scanToken = Start-DiskHealthPerformanceStage -Stage 'Discovery.FullScan' -ParentStage 'Network.Discovery'
+    try {
+        $computers = @(Find-WinRMComputer `
+            -StateRoot $StateRoot `
+            -NetworkId $NetworkId `
+            -IncludeDiagnostics:$script:DiskHealthBenchmarkEnabled `
+            -DiagnosticsInMemoryOnly:$script:DiskHealthBenchmarkEnabled)
+        Complete-DiskHealthPerformanceStage -Token $scanToken -Status success -ResultCount $computers.Count
+        if ($script:DiskHealthBenchmarkEnabled) {
+            Add-DiskHealthDiscoveryDiagnostics -Diagnostics @(Get-WinRMDiscoveryDiagnostics) -ScanToken $scanToken
+        }
+    } catch {
+        $category = Get-DiskHealthPerformanceErrorCategory $_
+        Complete-DiskHealthPerformanceStage -Token $scanToken -Status $(if ($category -eq 'Timeout') { 'timeout' } else { 'failure' }) -ErrorCategory $category
+        throw
+    }
+    return $computers
+}
+
+function Resolve-DiskHealthSavedWinRMTargetsParallel {
+    param(
+        [AllowNull()][object[]]$History,
+        [AllowEmptyString()][string]$StateRoot = '',
+        [ValidateRange(1, 16)][int]$MaxConcurrency = 8
+    )
+
+    $entries = @($History)
+    if ($entries.Count -eq 0) { return @() }
+    $manifest = Join-Path -Path $PSScriptRoot -ChildPath '.assets\WinRMDiscovery\WinRMDiscovery.psd1'
+    $workerScript = {
+        param($Manifest, $DiscoveryStateRoot, $ComputerName, $LastIPAddress, $MACAddress)
+
+        Import-Module -Name $Manifest -Force -ErrorAction Stop
+        if (-not [string]::IsNullOrWhiteSpace($DiscoveryStateRoot)) {
+            Set-WinRMDiscoveryStateRoot -Path $DiscoveryStateRoot
+        }
+        $resolution = Resolve-WinRMHistoryTargetAddress `
+            -ComputerName $ComputerName `
+            -LastIPAddress $LastIPAddress `
+            -MACAddress $MACAddress `
+            -IncludeDiagnostics
+        [PSCustomObject]@{
+            ResolvedAddress = [string]$resolution.ResolvedAddress
+            Diagnostics     = @($resolution.Diagnostics)
         }
     }
-    if ($computers.Count -eq 0) {
-        throw 'Δεν εντοπίστηκαν Windows PCs μέσω WS-Discovery ή των WinRM/SMB/RDP ports.'
-    }
 
-    return $computers
+    $poolToken = Start-DiskHealthPerformanceStage -Stage 'History.Resolve.RunspacePool' -ParentStage 'History.Resolve'
+    $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, [Math]::Min($MaxConcurrency, $entries.Count))
+    $pool.Open()
+    Complete-DiskHealthPerformanceStage -Token $poolToken -Status success -ResultCount ([Math]::Min($MaxConcurrency, $entries.Count))
+    $jobs = [System.Collections.Generic.List[object]]::new()
+    $ordinal = 0
+    try {
+        foreach ($entry in $entries) {
+            $ordinal++
+            $powerShell = [PowerShell]::Create()
+            $powerShell.RunspacePool = $pool
+            $null = $powerShell.AddScript($workerScript.ToString()).AddArgument($manifest).AddArgument($StateRoot).AddArgument([string]$entry.ComputerName).AddArgument([string]$entry.LastIPAddress).AddArgument([string]$entry.MACAddress)
+            $jobs.Add([PSCustomObject]@{
+                Ordinal   = $ordinal
+                Entry     = $entry
+                PowerShell = $powerShell
+                Handle    = $powerShell.BeginInvoke()
+                StartUtc  = [datetime]::UtcNow
+                Watch     = [System.Diagnostics.Stopwatch]::StartNew()
+            })
+        }
+
+        $progressWatch = [System.Diagnostics.Stopwatch]::StartNew()
+        do {
+            $completedCount = @($jobs | Where-Object { $_.Handle.IsCompleted }).Count
+            if ($progressWatch.ElapsedMilliseconds -ge 500 -or $completedCount -eq $jobs.Count) {
+                Show-DiskHealthPerformanceProgress -Stage "History.ResolveParallel[$completedCount/$($jobs.Count)]" -Message 'Canonical saved-target resolvers are running concurrently.'
+                $progressWatch.Restart()
+            }
+            if ($completedCount -lt $jobs.Count) { Start-Sleep -Milliseconds 100 }
+        } while ($completedCount -lt $jobs.Count)
+
+        $resolvedRows = [System.Collections.Generic.List[object]]::new()
+        foreach ($job in @($jobs | Sort-Object Ordinal)) {
+            $resolvedAddress = ''
+            $status = 'success'
+            $errorCategory = ''
+            try {
+                $output = @($job.PowerShell.EndInvoke($job.Handle))
+                $payload = $output | Where-Object { $_.PSObject.Properties['ResolvedAddress'] } | Select-Object -Last 1
+                if ($null -ne $payload) { $resolvedAddress = [string]$payload.ResolvedAddress }
+                if ($null -ne $payload -and $payload.PSObject.Properties['Diagnostics']) {
+                    foreach ($diagnostic in @($payload.Diagnostics)) {
+                        Add-DiskHealthPerformanceRecord `
+                            -Stage "History.Resolve.Entry$($job.Ordinal).$([string]$diagnostic.Stage)" `
+                            -ParentStage "History.Resolve.Entry$($job.Ordinal)" `
+                            -StartUtc ([datetime]$diagnostic.StartUtc) `
+                            -EndUtc ([datetime]$diagnostic.EndUtc) `
+                            -DurationMs ([double]$diagnostic.DurationMs) `
+                            -Status ([string]$diagnostic.Status) `
+                            -AttemptCount ([int]$diagnostic.AttemptCount) `
+                            -ResultCount ([int]$diagnostic.ResultCount) `
+                            -ErrorCategory ([string]$diagnostic.ErrorCategory)
+                    }
+                }
+                if ([string]::IsNullOrWhiteSpace($resolvedAddress)) {
+                    $status = 'failure'
+                    $errorCategory = 'Unresolved'
+                }
+            } catch {
+                $status = if ((Get-DiskHealthPerformanceErrorCategory $_) -eq 'Timeout') { 'timeout' } else { 'failure' }
+                $errorCategory = Get-DiskHealthPerformanceErrorCategory $_
+            } finally {
+                $job.Watch.Stop()
+                Add-DiskHealthPerformanceRecord `
+                    -Stage "History.Resolve.Entry$($job.Ordinal)" `
+                    -ParentStage 'History.Resolve' `
+                    -StartUtc $job.StartUtc `
+                    -EndUtc ([datetime]::UtcNow) `
+                    -DurationMs $job.Watch.Elapsed.TotalMilliseconds `
+                    -Status $status `
+                    -AttemptCount 1 `
+                    -ResultCount ([int](-not [string]::IsNullOrWhiteSpace($resolvedAddress))) `
+                    -ErrorCategory $errorCategory
+                $job.PowerShell.Dispose()
+            }
+            $resolvedRows.Add([PSCustomObject]@{
+                Ordinal         = $job.Ordinal
+                Entry           = $job.Entry
+                ResolvedAddress = $resolvedAddress
+            })
+        }
+        return @($resolvedRows)
+    } finally {
+        foreach ($job in @($jobs)) {
+            if ($null -ne $job.PowerShell) { $job.PowerShell.Dispose() }
+        }
+        $pool.Close()
+        $pool.Dispose()
+    }
+}
+
+function Get-DiskHealthCatalogTargetPresentation {
+    param(
+        [Parameter(Mandatory)]$Entry,
+        [bool]$HasFreshSnapshot
+    )
+
+    $hasTargetSnapshot = [bool]$Entry.HasDiscoverySnapshot
+    $winRMHttpOpen = $(if ($hasTargetSnapshot) { [bool]$Entry.WinRMHttpOpen } else { $false })
+    $smbOpen = $(if ($hasTargetSnapshot) { [bool]$Entry.SMBOpen } else { $false })
+    $detectedOnly = $(if ($hasTargetSnapshot) { [bool]$Entry.DetectedOnly } else { $false })
+    $status = $(if ($hasTargetSnapshot) {
+            $cachedStatus = [string]$Entry.CachedStatus
+            if ([string]::IsNullOrWhiteSpace($cachedStatus)) { $cachedStatus = 'ComputerDetected' }
+            "Fresh scan / $cachedStatus"
+        } elseif ($HasFreshSnapshot -and [bool]$Entry.HasSavedHistory) {
+            'Fresh scan / offline'
+        } elseif ([bool]$Entry.HasSavedHistory) {
+            'Saved / not checked'
+        } else {
+            'Cached discovery'
+        })
+
+    return [PSCustomObject]@{
+        WinRMHttpOpen      = $winRMHttpOpen
+        SMBOpen            = $smbOpen
+        DetectedOnly       = $detectedOnly
+        Status             = $status
+        ValidationStatus   = [string]$Entry.ValidationStatus
+        HasDiscoverySnapshot = $hasTargetSnapshot
+    }
 }
 
 function Get-DiskHealthSavedWinRMTargets {
     param([string]$StateRoot = '')
 
+    $pathToken = Start-DiskHealthPerformanceStage -Stage 'History.SavedTargetPath' -ParentStage 'Network.Discovery'
+    Show-DiskHealthPerformanceProgress -Stage 'History.Initialization' -Message 'Loading network-scoped saved targets.'
     Import-DiskHealthWinRMDiscovery -StateRoot $StateRoot
+    $identityToken = Start-DiskHealthPerformanceStage -Stage 'History.NetworkIdentity' -ParentStage 'History.SavedTargetPath'
     $networkInfo = Get-WinRMNetworkIdentity
-    $history = @(Get-WinRMConnectionHistory -NetworkId $networkInfo.NetworkId | Sort-Object { [datetime]$_.LastConnected } -Descending)
+    Complete-DiskHealthPerformanceStage -Token $identityToken -Status success -ResultCount 1
+    $historyToken = Start-DiskHealthPerformanceStage -Stage 'History.TargetCatalog' -ParentStage 'History.SavedTargetPath'
+    $catalog = Get-WinRMTargetCatalog -NetworkId $networkInfo.NetworkId -IncludeDiagnostics:$script:DiskHealthBenchmarkEnabled
+    Complete-DiskHealthPerformanceStage -Token $historyToken -Status success -ResultCount $catalog.TargetCount
+    foreach ($diagnostic in @($catalog.Diagnostics)) {
+        Add-DiskHealthPerformanceRecord `
+            -Stage ([string]$diagnostic.Stage) `
+            -ParentStage 'History.TargetCatalog' `
+            -StartUtc ([datetime]$diagnostic.StartUtc) `
+            -EndUtc ([datetime]$diagnostic.EndUtc) `
+            -DurationMs ([double]$diagnostic.DurationMs) `
+            -Status ([string]$diagnostic.Status) `
+            -AttemptCount ([int]$diagnostic.AttemptCount) `
+            -ResultCount ([int]$diagnostic.ResultCount) `
+            -ErrorCategory ([string]$diagnostic.ErrorCategory)
+    }
     $targets = [System.Collections.Generic.List[object]]::new()
+    $hasFreshSnapshot = -not [string]::IsNullOrWhiteSpace([string]$catalog.SnapshotCapturedAtUtc)
 
-    foreach ($entry in $history) {
-        $resolveWatch = [System.Diagnostics.Stopwatch]::StartNew()
-        $resolvedAddress = Resolve-WinRMHistoryTargetAddress `
-            -ComputerName $entry.ComputerName `
-            -LastIPAddress $entry.LastIPAddress `
-            -MACAddress $entry.MACAddress
-        $resolveWatch.Stop()
-        Write-DiskHealthBenchmarkLine `
-            -Phase 'Discovery.SavedTargetProbe' `
-            -Milliseconds $resolveWatch.Elapsed.TotalMilliseconds `
-            -Details "$($entry.ComputerName) -> $resolvedAddress"
-
-        if ([string]::IsNullOrWhiteSpace($resolvedAddress)) { continue }
+    foreach ($entry in @($catalog.Targets)) {
+        $presentation = Get-DiskHealthCatalogTargetPresentation -Entry $entry -HasFreshSnapshot $hasFreshSnapshot
         $targets.Add([PSCustomObject]@{
             ComputerName  = $entry.ComputerName
-            IPAddress     = $resolvedAddress
+            IPAddress     = $entry.IPAddress
             MACAddress    = $entry.MACAddress
             UserName      = $entry.UserName
             LastConnected = $entry.LastConnected
-            WinRMHttpOpen = $true
-            SMBOpen       = $false
-            DetectedOnly  = $false
-            Status        = 'Saved / WinRMReady'
-            Source        = 'History'
+            WinRMHttpOpen = $presentation.WinRMHttpOpen
+            SMBOpen       = $presentation.SMBOpen
+            DetectedOnly  = $presentation.DetectedOnly
+            Status        = $presentation.Status
+            ValidationStatus = $presentation.ValidationStatus
+            HasDiscoverySnapshot = $presentation.HasDiscoverySnapshot
+            Source        = $entry.Source
+            RequiresValidation = [bool]$entry.RequiresValidation
         })
     }
+
+    $mergeToken = Start-DiskHealthPerformanceStage -Stage 'Discovery.MergeDedupSort' -ParentStage 'Network.Discovery'
+    Complete-DiskHealthPerformanceStage -Token $mergeToken -Status skipped -ResultCount $targets.Count
+    Complete-DiskHealthPerformanceStage -Token $pathToken -Status success -ResultCount $targets.Count
 
     return [PSCustomObject]@{
         NetworkInfo = $networkInfo
@@ -415,10 +916,10 @@ function Select-WinRMDiscoveryTarget {
         [switch]$AllowScan
     )
 
-    if ($null -eq $Computers -or $Computers.Count -eq 0) {
-        $Computers = @(Get-DiskHealthWinRMComputers -StateRoot $StateRoot)
-    }
+    if ($null -eq $Computers) { $Computers = @() }
 
+    Show-DiskHealthPerformanceProgress -Stage 'TargetMenu.Build' -Message 'Building target rows from sanitized discovery results.'
+    $buildToken = Start-DiskHealthPerformanceStage -Stage 'TargetMenu.Build' -ParentStage 'Network.TargetSelection'
     $selectedIndex = 0
     for ($index = 0; $index -lt $Computers.Count; $index++) {
         if ($Computers[$index].WinRMHttpOpen) { $selectedIndex = $index; break }
@@ -446,13 +947,16 @@ function Select-WinRMDiscoveryTarget {
             Color         = $_C.H1
         })
     }
+    Complete-DiskHealthPerformanceStage -Token $buildToken -Status success -ResultCount $options.Count
     return Show-DiskHealthChoiceMenu `
         -Title 'DiskHealth network targets' `
         -Subtitle 'Επιλέξτε WinRM υπολογιστή.' `
         -Options @($options) `
         -DefaultIndex $selectedIndex `
         -EscapeValue $null `
-        -EscapeMode Back
+        -EscapeMode Back `
+        -PerformanceStage 'TargetMenu.FirstFrame' `
+        -PerformanceParentStage 'Network.TargetSelection'
 }
 
 function Invoke-DiscoveredWinRMTarget {
@@ -465,15 +969,54 @@ function Invoke-DiscoveredWinRMTarget {
     Import-DiskHealthWinRMDiscovery -StateRoot $DiscoveryStateRoot
     Import-DiskHealthWinRMConnection
     if ($null -eq $NetworkInfo) {
+        $networkIdentityToken = Start-DiskHealthPerformanceStage -Stage 'History.NetworkIdentity.Refresh' -ParentStage 'Network.Authentication'
         $NetworkInfo = Get-WinRMNetworkIdentity
+        Complete-DiskHealthPerformanceStage -Token $networkIdentityToken -Status success -ResultCount 1
     }
     $networkId = [string]$NetworkInfo.NetworkId
+    $requiresValidation = $Target.PSObject.Properties['RequiresValidation'] -and [bool]$Target.RequiresValidation
+    if ($requiresValidation) {
+        Show-DiskHealthPerformanceProgress -Stage 'History.SelectedTargetResolve' -Message 'Validating only the selected saved target.' -ForceClear
+        $resolveToken = Start-DiskHealthPerformanceStage -Stage 'History.SelectedTargetResolve' -ParentStage 'Network.Authentication'
+        $resolution = Resolve-WinRMHistoryTargetAddress `
+            -ComputerName ([string]$Target.ComputerName) `
+            -LastIPAddress ([string]$Target.IPAddress) `
+            -MACAddress ([string]$Target.MACAddress) `
+            -IncludeDiagnostics
+        foreach ($diagnostic in @($resolution.Diagnostics)) {
+            Add-DiskHealthPerformanceRecord `
+                -Stage "History.SelectedTargetResolve.$([string]$diagnostic.Stage)" `
+                -ParentStage 'History.SelectedTargetResolve' `
+                -StartUtc ([datetime]$diagnostic.StartUtc) `
+                -EndUtc ([datetime]$diagnostic.EndUtc) `
+                -DurationMs ([double]$diagnostic.DurationMs) `
+                -Status ([string]$diagnostic.Status) `
+                -AttemptCount ([int]$diagnostic.AttemptCount) `
+                -ResultCount ([int]$diagnostic.ResultCount) `
+                -ErrorCategory ([string]$diagnostic.ErrorCategory)
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$resolution.ResolvedAddress)) {
+            Complete-DiskHealthPerformanceStage -Token $resolveToken -Status failure -AttemptCount 1 -ErrorCategory 'Unresolved'
+            $null = Show-DiskHealthChoiceMenu `
+                -Title 'Saved target unavailable' `
+                -Subtitle 'Το επιλεγμένο PC δεν απάντησε τώρα στο WinRM 5985.' `
+                -Options @([PSCustomObject]@{ Label = '↩ Back to network targets' }) `
+                -DefaultIndex 0 `
+                -EscapeValue $null `
+                -EscapeMode Back
+            return $false
+        }
+        $Target.IPAddress = [string]$resolution.ResolvedAddress
+        Complete-DiskHealthPerformanceStage -Token $resolveToken -Status success -AttemptCount 1 -ResultCount 1
+    }
+    $historyMatchToken = Start-DiskHealthPerformanceStage -Stage 'History.TargetLookup' -ParentStage 'Network.Authentication'
     $historyMatch = Get-WinRMConnectionHistory -NetworkId $networkId |
         Where-Object {
             $_.ComputerName -eq $Target.ComputerName -or
             $_.LastIPAddress -eq $Target.IPAddress
         } |
         Select-Object -First 1
+    Complete-DiskHealthPerformanceStage -Token $historyMatchToken -Status success -ResultCount ([int]($null -ne $historyMatch))
     $preferredUsername = if ($historyMatch -and -not [string]::IsNullOrWhiteSpace($historyMatch.UserName) -and $historyMatch.UserName -ne 'Unknown') {
         [string]$historyMatch.UserName
     } elseif (-not [string]::IsNullOrWhiteSpace($Target.UserName) -and $Target.UserName -ne 'Unknown') {
@@ -486,7 +1029,10 @@ function Invoke-DiscoveredWinRMTarget {
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
             Select-Object -Unique
     )
+    Show-DiskHealthPerformanceProgress -Stage 'Credential.DPAPILookup' -Message 'Only the canonical DPAPI profile API is used.'
+    $credentialLookupToken = Start-DiskHealthPerformanceStage -Stage 'Credential.DPAPILookup' -ParentStage 'Network.Authentication'
     $storedCredential = Get-DiskHealthStoredCredential -NetworkId $networkId -ComputerNames $credentialAliases
+    Complete-DiskHealthPerformanceStage -Token $credentialLookupToken -Status success -ResultCount ([int]($null -ne $storedCredential))
     if ($storedCredential) {
         $preferredUsername = $storedCredential.UserName
     }
@@ -501,12 +1047,14 @@ function Invoke-DiscoveredWinRMTarget {
         Write-Host "  🔐 Αποθηκευμένα credentials: $($credentialToUse.UserName)" -ForegroundColor Green
         Write-Host "  🔄 Δοκιμή αυτόματης σύνδεσης στο ίδιο αποθηκευμένο δίκτυο..." -ForegroundColor DarkGray
     } else {
+        $credentialPromptToken = Start-DiskHealthPerformanceStage -Stage 'Credential.Prompt' -ParentStage 'Network.Authentication'
         Write-Host "  Username: ENTER = '$preferredUsername'" -ForegroundColor DarkGray
         $enteredUsername = (Read-Host '  Username').Trim()
         $remoteUsername = if ([string]::IsNullOrWhiteSpace($enteredUsername)) { $preferredUsername } else { $enteredUsername }
         Write-Host '  Password: ENTER = blank' -ForegroundColor DarkGray
         $securePassword = Read-Host '  Password' -AsSecureString
         $credentialToUse = [System.Management.Automation.PSCredential]::new($remoteUsername, $securePassword)
+        Complete-DiskHealthPerformanceStage -Token $credentialPromptToken -Status success -AttemptCount 1 -ResultCount 1
     }
 
     & $PSCommandPath `
@@ -515,13 +1063,14 @@ function Invoke-DiscoveredWinRMTarget {
         -Credential $credentialToUse `
         -InstallSmartctl:$InstallSmartctl `
         -DiscoveryStateRoot $DiscoveryStateRoot `
-        -Benchmark:$Benchmark `
+        -Benchmark:$script:DiskHealthBenchmarkEnabled `
         -ConnectionNetworkId $networkId `
         -ConnectionDisplayName $Target.ComputerName `
         -ConnectionMacAddress $Target.MACAddress `
         -CredentialFromSavedProfile:($null -ne $storedCredential) `
         -NoUI:$NoUI `
-        -EmbeddedRemote
+        -EmbeddedRemote `
+        -PerformanceContext $script:DiskHealthPerformanceContext
 }
 
 function Show-StartupTargetMenu {
@@ -558,45 +1107,70 @@ if ($script:IsHomeLauncher) {
         }
 
         if ($startupChoice -eq 'Network') {
-            Clear-Host
-            $savedState = Get-DiskHealthSavedWinRMTargets -StateRoot $DiscoveryStateRoot
-            $networkInfo = $savedState.NetworkInfo
-            $networkComputers = @($savedState.Targets)
-            $allowNetworkScan = $true
-            if ($networkComputers.Count -eq 0) {
-                $networkComputers = @(Get-DiskHealthWinRMComputers -StateRoot $DiscoveryStateRoot)
-                $allowNetworkScan = $false
-            }
-            while ($true) {
-                Clear-Host
-                $discoveredTarget = Select-WinRMDiscoveryTarget -Computers $networkComputers -AllowScan:$allowNetworkScan
-                if ($null -eq $discoveredTarget) {
-                    break
+            Initialize-DiskHealthPerformance
+            $networkFlowToken = Start-DiskHealthPerformanceStage -Stage 'Network.Flow.Total' -ParentStage 'Run'
+            $networkFlowFailed = $false
+            try {
+                $firstProgressToken = Start-DiskHealthPerformanceStage -Stage 'Network.SelectionToFirstProgress' -ParentStage 'Network.Flow.Total'
+                Show-DiskHealthPerformanceProgress -Stage 'Network.Starting' -Message 'Loading canonical WinRM assets and saved history.' -ForceClear
+                Complete-DiskHealthPerformanceStage -Token $firstProgressToken -Status success -ResultCount 1
+                $savedState = Get-DiskHealthSavedWinRMTargets -StateRoot $DiscoveryStateRoot
+                $networkInfo = $savedState.NetworkInfo
+                $networkComputers = @($savedState.Targets)
+                $allowNetworkScan = $true
+                while ($true) {
+                    $discoveredTarget = Select-WinRMDiscoveryTarget -Computers $networkComputers -AllowScan:$allowNetworkScan
+                    if ($null -eq $discoveredTarget) {
+                        break
+                    }
+                    if ($discoveredTarget.Action -eq 'Scan') {
+                        Show-DiskHealthPerformanceProgress -Stage 'Discovery.FullScan' -Message 'Refreshing the target list.' -ForceClear
+                        $null = @(Get-DiskHealthWinRMComputers -StateRoot $DiscoveryStateRoot -NetworkId $networkInfo.NetworkId)
+                        $savedState = Get-DiskHealthSavedWinRMTargets -StateRoot $DiscoveryStateRoot
+                        $networkComputers = @($savedState.Targets)
+                        continue
+                    }
+                    Invoke-DiscoveredWinRMTarget -Target $discoveredTarget -DefaultUsername $Username -NetworkInfo $networkInfo
                 }
-                if ($discoveredTarget.Action -eq 'Scan') {
-                    Clear-Host
-                    $networkComputers = @(Get-DiskHealthWinRMComputers -StateRoot $DiscoveryStateRoot)
-                    $allowNetworkScan = $false
-                    continue
+            } catch {
+                $networkFlowFailed = $true
+                throw
+            } finally {
+                Complete-DiskHealthPerformanceStage -Token $networkFlowToken -Status $(if ($networkFlowFailed) { 'failure' } else { 'success' }) -ErrorCategory $(if ($networkFlowFailed) { 'NetworkFlow' } else { '' })
+                if ($networkFlowFailed) {
+                    Save-DiskHealthPerformanceReport -Finalize -ShowSummary
+                } else {
+                    Save-DiskHealthPerformanceReport
                 }
-                Invoke-DiscoveredWinRMTarget -Target $discoveredTarget -DefaultUsername $Username -NetworkInfo $networkInfo
             }
         }
     }
+    if ($null -ne $script:DiskHealthPerformanceContext) {
+        Save-DiskHealthPerformanceReport -Finalize -ShowSummary
+    }
+    return
 }
 
 if ($Discover) {
     if (-not [string]::IsNullOrWhiteSpace($FilePath)) {
         throw 'Τα -Discover και -FilePath δεν μπορούν να χρησιμοποιηθούν μαζί.'
     }
-    $discoveredTarget = Select-WinRMDiscoveryTarget -StateRoot $DiscoveryStateRoot
-    if ($null -eq $discoveredTarget) {
-        Write-Host 'Η επιλογή στόχου ακυρώθηκε.' -ForegroundColor Yellow
-        return
-    }
-    $ComputerName = $discoveredTarget.IPAddress
     Import-DiskHealthWinRMDiscovery -StateRoot $DiscoveryStateRoot
     $discoverNetworkInfo = Get-WinRMNetworkIdentity
+    $discoverComputers = @(Get-DiskHealthWinRMComputers -StateRoot $DiscoveryStateRoot -NetworkId $discoverNetworkInfo.NetworkId)
+    while ($true) {
+        $discoveredTarget = Select-WinRMDiscoveryTarget -Computers $discoverComputers -AllowScan
+        if ($null -eq $discoveredTarget) {
+            Write-Host 'Η επιλογή στόχου ακυρώθηκε.' -ForegroundColor Yellow
+            return
+        }
+        if ($discoveredTarget.Action -eq 'Scan') {
+            $discoverComputers = @(Get-DiskHealthWinRMComputers -StateRoot $DiscoveryStateRoot -NetworkId $discoverNetworkInfo.NetworkId)
+            continue
+        }
+        break
+    }
+    $ComputerName = $discoveredTarget.IPAddress
     $ConnectionNetworkId = $discoverNetworkInfo.NetworkId
     $ConnectionDisplayName = $discoveredTarget.ComputerName
     $ConnectionMacAddress = $discoveredTarget.MACAddress
@@ -1327,6 +1901,7 @@ function Show-DiskHealthReport {
         [AllowEmptyString()][string]$Target = ''
     )
 
+    $firstFrameToken = Start-DiskHealthPerformanceStage -Stage 'Report.FirstRenderedFrame' -ParentStage 'Report'
     $scrollOffset = 0
     $horizontalOffset = 0
     Initialize-TuiHost
@@ -1347,6 +1922,11 @@ function Show-DiskHealthReport {
             $horizontalOffset = $view.HorizontalOffset
             [Console]::Write((Get-DiskHealthReportFramePayload -Frame $view.Frame -ForceClear:$script:RequestForceClear))
             $script:RequestForceClear = $false
+            if ($null -ne $firstFrameToken) {
+                Complete-DiskHealthPerformanceStage -Token $firstFrameToken -Status success -ResultCount $Rows.Count
+                Save-DiskHealthPerformanceReport
+                $firstFrameToken = $null
+            }
 
             $key = Read-ConsoleKey
             switch ($key.Key) {
@@ -1396,6 +1976,10 @@ function Get-AtaTelemetryProfile {
     )
 
     if ($Model -match '(?i)SAMSUNG') { return 'Samsung' }
+    # Kingston publishes a model-specific SMART contract for the UV400. Its
+    # 0xE7 normalized value is remaining life; the raw value is not the same
+    # metric. Resolve this before the generic name-based Phison fallback.
+    if ($Model -match '(?i)^\s*KINGSTON\s+SUV400S37A?(120|240|480|960)G\s*$') { return 'KingstonUV400' }
     # Do not classify every WDC/WD model as this SSD family: WD HDDs use unrelated
     # attribute layouts. WDS model numbers and explicit SanDisk/WD SSD names are
     # the reliable model hints for the shared WD/SanDisk SATA SSD mapping.
@@ -1453,7 +2037,17 @@ function Get-AtaTelemetryProfile {
     if ($hasPlausibleA9Lifetime -and $patriotBurstMatches -ge 10 -and $ids.ContainsKey(0xAB) -and $ids.ContainsKey(0xAC)) {
         return 'PatriotBurst'
     }
-    if ($hasPlausibleA9Lifetime -and $smiOemMatches -ge 9 -and $ids.ContainsKey(0xA0) -and $ids.ContainsKey(0xB2)) {
+    $hasSmiInternalWriteCounters = (
+        $ids.ContainsKey(0xF1) -and
+        $ids.ContainsKey(0xF2) -and
+        $ids.ContainsKey(0xF5)
+    )
+    if (
+        $hasPlausibleA9Lifetime -and
+        $smiOemMatches -ge 9 -and
+        $ids.ContainsKey(0xA0) -and
+        ($ids.ContainsKey(0xB2) -or $hasSmiInternalWriteCounters)
+    ) {
         return 'SiliconMotionOEM'
     }
 
@@ -1470,7 +2064,7 @@ function Get-AtaTelemetryProfile {
 
 function Get-AtaHealthEstimate {
     param(
-        [Parameter(Mandatory)][string]$Profile,
+        [Parameter(Mandatory)][Alias('Profile')][string]$TelemetryProfile,
         [Parameter(Mandatory)][object[]]$Attributes
     )
 
@@ -1481,30 +2075,50 @@ function Get-AtaHealthEstimate {
         IsTrusted = $false
     }
 
-    if ($Profile -eq 'Samsung') {
+    if ($TelemetryProfile -eq 'Samsung') {
         $wear = $Attributes | Where-Object { $_.ID -eq 0xB1 } | Select-Object -First 1
         if ($wear -and $null -ne $wear.Current -and [int]$wear.Current -ge 0 -and [int]$wear.Current -le 100) {
             $result.Percentage = [int]$wear.Current
             $result.Source = 'Wear Leveling Count (0xB1 normalized)'
             $result.IsTrusted = $true
         }
-    } elseif ($Profile -in @('SiliconMotionOEM', 'PatriotBurst')) {
+    } elseif ($TelemetryProfile -in @('SiliconMotionOEM', 'PatriotBurst')) {
         $wear = $Attributes | Where-Object { $_.ID -eq 0xA9 } | Select-Object -First 1
         if ($wear -and $null -ne $wear.Raw -and [long]$wear.Raw -ge 0 -and [long]$wear.Raw -le 100) {
             $result.Percentage = [int]$wear.Raw
             $result.Source = 'Remaining Lifetime Percentage (0xA9 raw)'
             $result.IsTrusted = $true
         }
-    } elseif ($Profile -eq 'Phison') {
+    } elseif ($TelemetryProfile -eq 'KingstonUV400') {
+        $wear = $Attributes | Where-Object { $_.ID -eq 0xE7 } | Select-Object -First 1
+        if ($wear -and $null -ne $wear.Current -and [int]$wear.Current -ge 0 -and [int]$wear.Current -le 100) {
+            $result.Percentage = [int]$wear.Current
+            $result.Source = 'SSD Life Left (0xE7 normalized)'
+            $result.IsTrusted = $true
+        }
+    } elseif ($TelemetryProfile -eq 'Phison') {
         $wear = $Attributes | Where-Object { $_.ID -eq 0xE7 } | Select-Object -First 1
         if ($wear -and $null -ne $wear.Raw -and [long]$wear.Raw -ge 0 -and [long]$wear.Raw -le 100) {
             $result.Percentage = [int]$wear.Raw
             $result.Source = 'SSD Life Left (0xE7 raw)'
             $result.IsTrusted = $true
         }
-    } elseif ($Profile -eq 'SanDisk') {
+    } elseif ($TelemetryProfile -eq 'SanDisk') {
+        $cyclesRemaining = $Attributes | Where-Object { $_.ID -eq 0xEE } | Select-Object -First 1
+        $mediaWearout = $Attributes | Where-Object { $_.ID -eq 0xE6 } | Select-Object -First 1
         $reserve = $Attributes | Where-Object { $_.ID -eq 0xE8 } | Select-Object -First 1
-        if ($reserve -and $null -ne $reserve.Raw -and [long]$reserve.Raw -ge 0 -and [long]$reserve.Raw -le 100) {
+        if (
+            $cyclesRemaining -and
+            $mediaWearout -and
+            $null -ne $cyclesRemaining.Current -and
+            [int]$cyclesRemaining.Current -ge 0 -and
+            [int]$cyclesRemaining.Current -le 100
+        ) {
+            $result.Percentage = [int]$cyclesRemaining.Current
+            $result.Source = 'Media Wearout Indicator Cycles Remaining (0xEE normalized)'
+            $result.MetricLabel = 'Life'
+            $result.IsTrusted = $true
+        } elseif ($reserve -and $null -ne $reserve.Raw -and [long]$reserve.Raw -ge 0 -and [long]$reserve.Raw -le 100) {
             $result.Percentage = [int]$reserve.Raw
             $result.Source = 'Available Reserved Space (0xE8 raw)'
             $result.MetricLabel = 'Reserve'
@@ -1515,13 +2129,342 @@ function Get-AtaHealthEstimate {
     return [PSCustomObject]$result
 }
 
+function Get-AtaStandardizedEnduranceEstimate {
+    param(
+        [AllowNull()]$SmartData
+    )
+
+    $result = [ordered]@{
+        Percentage     = $null
+        UsedPercentage = $null
+        Source         = 'ATA Device Statistics endurance unavailable'
+        MetricLabel    = 'Life'
+        IsTrusted      = $false
+    }
+
+    if ($null -eq $SmartData) {
+        return [PSCustomObject]$result
+    }
+
+    $statisticsProperty = $SmartData.PSObject.Properties['ata_device_statistics']
+    if ($null -eq $statisticsProperty -or $null -eq $statisticsProperty.Value) {
+        return [PSCustomObject]$result
+    }
+
+    $ssdPage = @($statisticsProperty.Value.pages) |
+        Where-Object { $null -ne $_.number -and [int]$_.number -eq 7 } |
+        Select-Object -First 1
+    if ($null -eq $ssdPage) {
+        return [PSCustomObject]$result
+    }
+
+    # ATA Device Statistics page 7, offset 8 is the standardized Percentage
+    # Used Endurance Indicator. Require the validity flag instead of treating
+    # missing, malformed, or unsupported telemetry as zero.
+    $enduranceEntry = @($ssdPage.table) |
+        Where-Object { $null -ne $_.offset -and [int]$_.offset -eq 8 } |
+        Select-Object -First 1
+    if ($null -eq $enduranceEntry -or $null -eq $enduranceEntry.flags -or $enduranceEntry.flags.valid -ne $true) {
+        return [PSCustomObject]$result
+    }
+
+    $usedPercentage = 0L
+    if (-not [long]::TryParse([string]$enduranceEntry.value, [ref]$usedPercentage)) {
+        return [PSCustomObject]$result
+    }
+    if ($usedPercentage -lt 0 -or $usedPercentage -gt 255) {
+        return [PSCustomObject]$result
+    }
+
+    $result.Percentage = [int][Math]::Max(0, 100 - $usedPercentage)
+    $result.UsedPercentage = [int]$usedPercentage
+    $result.Source = 'ATA Device Statistics: Percentage Used Endurance'
+    $result.IsTrusted = $true
+    return [PSCustomObject]$result
+}
+
+function Get-AtaSmartctlDatabaseEnduranceEstimate {
+    param(
+        [AllowNull()]$SmartData
+    )
+
+    $result = [ordered]@{
+        Percentage     = $null
+        UsedPercentage = $null
+        Source         = 'smartmontools drive database endurance unavailable'
+        MetricLabel    = 'Life'
+        IsTrusted      = $false
+    }
+
+    if ($null -eq $SmartData) {
+        return [PSCustomObject]$result
+    }
+
+    # smartctl 7.5 exposes a protocol-independent endurance_used value. Trust it
+    # here only when smartctl confirms a drivedb match; otherwise it may merely
+    # repeat unverified device telemetry under a convenient common property.
+    $databaseProperty = $SmartData.PSObject.Properties['in_smartctl_database']
+    if ($null -eq $databaseProperty -or $databaseProperty.Value -ne $true) {
+        return [PSCustomObject]$result
+    }
+
+    $enduranceProperty = $SmartData.PSObject.Properties['endurance_used']
+    if ($null -eq $enduranceProperty -or $null -eq $enduranceProperty.Value) {
+        return [PSCustomObject]$result
+    }
+
+    $currentProperty = $enduranceProperty.Value.PSObject.Properties['current_percent']
+    if ($null -eq $currentProperty) {
+        return [PSCustomObject]$result
+    }
+
+    $usedPercentage = 0L
+    if (-not [long]::TryParse([string]$currentProperty.Value, [ref]$usedPercentage)) {
+        return [PSCustomObject]$result
+    }
+    if ($usedPercentage -lt 0 -or $usedPercentage -gt 255) {
+        return [PSCustomObject]$result
+    }
+
+    $result.Percentage = [int][Math]::Max(0, 100 - $usedPercentage)
+    $result.UsedPercentage = [int]$usedPercentage
+    $result.Source = 'smartmontools drive database: endurance_used'
+    $result.IsTrusted = $true
+    return [PSCustomObject]$result
+}
+
+function Get-WindowsStorageWearEstimate {
+    param(
+        [AllowNull()]$ReliabilityCounter
+    )
+
+    $result = [ordered]@{
+        Percentage     = $null
+        UsedPercentage = $null
+        Source         = 'Windows Storage Reliability Counter wear unavailable'
+        MetricLabel    = 'Life'
+        IsTrusted      = $false
+    }
+
+    if ($null -eq $ReliabilityCounter) {
+        return [PSCustomObject]$result
+    }
+
+    $wearProperty = $ReliabilityCounter.PSObject.Properties['Wear']
+    if ($null -eq $wearProperty -or $null -eq $wearProperty.Value) {
+        return [PSCustomObject]$result
+    }
+
+    $usedPercentage = 0L
+    if (-not [long]::TryParse([string]$wearProperty.Value, [ref]$usedPercentage)) {
+        return [PSCustomObject]$result
+    }
+    # Several Windows SATA drivers expose an unsupported/default Wear value as
+    # zero even when ATA telemetry proves measurable wear. Without corroborating
+    # evidence, zero cannot distinguish "new drive" from "not implemented".
+    if ($usedPercentage -le 0 -or $usedPercentage -gt 100) {
+        return [PSCustomObject]$result
+    }
+
+    $result.Percentage = [int](100 - $usedPercentage)
+    $result.UsedPercentage = [int]$usedPercentage
+    $result.Source = 'Windows Storage Reliability Counter: Wear'
+    $result.IsTrusted = $true
+    return [PSCustomObject]$result
+}
+
+function Get-AtaLifeEstimate {
+    param(
+        [AllowNull()]$SmartData,
+        [Parameter(Mandatory)][Alias('Profile')][string]$TelemetryProfile,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Attributes,
+        [AllowNull()]$ReliabilityCounter
+    )
+
+    $vendor = if (@($Attributes).Count -gt 0) {
+        Get-AtaHealthEstimate -Profile $TelemetryProfile -Attributes $Attributes
+    } else {
+        [PSCustomObject]@{ Percentage = $null; Source = ''; MetricLabel = 'Life'; IsTrusted = $false }
+    }
+
+    $standardized = Get-AtaStandardizedEnduranceEstimate -SmartData $SmartData
+    if ($standardized.IsTrusted) {
+        if ($vendor.IsTrusted -and $vendor.MetricLabel -eq 'Life') {
+            $difference = [Math]::Abs([int]$standardized.Percentage - [int]$vendor.Percentage)
+            if ($difference -le 5) {
+                $selectedPercentage = [Math]::Min([int]$standardized.Percentage, [int]$vendor.Percentage)
+                return [PSCustomObject]@{
+                    Percentage = $selectedPercentage
+                    UsedPercentage = [int]$standardized.UsedPercentage
+                    Source = "Conservative agreement: $($standardized.Source)=$($standardized.Percentage)%, $($vendor.Source)=$($vendor.Percentage)%"
+                    MetricLabel = 'Life'
+                    IsTrusted = $true
+                }
+            }
+            return [PSCustomObject]@{
+                Percentage = $null
+                UsedPercentage = [int]$standardized.UsedPercentage
+                Source = "Conflicting SSD lifetime readings: $($standardized.Source)=$($standardized.Percentage)%, $($vendor.Source)=$($vendor.Percentage)%"
+                MetricLabel = 'Life'
+                IsTrusted = $false
+            }
+        }
+        $standardized.Source = "$($standardized.Source) ($($standardized.UsedPercentage)% used)"
+        return $standardized
+    }
+
+    $database = Get-AtaSmartctlDatabaseEnduranceEstimate -SmartData $SmartData
+    if ($database.IsTrusted) {
+        $database.Source = "$($database.Source) ($($database.UsedPercentage)% used)"
+        return $database
+    }
+
+    if ($vendor.IsTrusted) {
+        return $vendor
+    }
+
+    $windows = Get-WindowsStorageWearEstimate -ReliabilityCounter $ReliabilityCounter
+    if ($windows.IsTrusted) {
+        $windows.Source = "$($windows.Source) ($($windows.UsedPercentage)% used)"
+        return $windows
+    }
+
+    return [PSCustomObject]@{
+        Percentage  = $null
+        Source      = 'No trustworthy SSD lifetime reading was available'
+        MetricLabel = 'Life'
+        IsTrusted   = $false
+    }
+}
+
+function Get-AtaDataTransferEstimate {
+    param(
+        [Parameter(Mandatory)][Alias('Profile')][string]$TelemetryProfile,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Attributes,
+        [AllowNull()]$SmartData
+    )
+
+    $result = [ordered]@{
+        HostReadsGiB  = $null
+        HostWritesGiB = $null
+        NandWritesGiB = $null
+        WriteAmplification = $null
+        Source = 'No verified counter-unit mapping'
+        IsSupported = $false
+    }
+
+    if (@($Attributes).Count -eq 0) {
+        return [PSCustomObject]$result
+    }
+
+    $f1 = $Attributes | Where-Object { $_.ID -eq 0xF1 } | Select-Object -First 1
+    $f2 = $Attributes | Where-Object { $_.ID -eq 0xF2 } | Select-Object -First 1
+    $f5 = $Attributes | Where-Object { $_.ID -eq 0xF5 } | Select-Object -First 1
+
+    switch ($TelemetryProfile) {
+        'SiliconMotionOEM' {
+            # Silicon Motion OEM/SM2258 family counters are expressed in 32 MiB
+            # units. This is the layout used by the ADATA DM900 and related
+            # controller families, rather than an exact-model exception.
+            if ($f1) { $result.HostWritesGiB = [Math]::Round(([double]$f1.Raw * 32 / 1024), 2) }
+            if ($f2) { $result.HostReadsGiB = [Math]::Round(([double]$f2.Raw * 32 / 1024), 2) }
+            if ($f5) { $result.NandWritesGiB = [Math]::Round(([double]$f5.Raw * 32 / 1024), 2) }
+            $result.Source = 'Silicon Motion OEM F1/F2/F5 (32 MiB units)'
+        }
+        'KingstonUV400' {
+            if ($f1) { $result.HostWritesGiB = [Math]::Round([double]$f1.Raw, 2) }
+            if ($f2) { $result.HostReadsGiB = [Math]::Round([double]$f2.Raw, 2) }
+            $result.Source = 'Kingston UV400 F1/F2 (GiB)'
+        }
+        'Phison' {
+            if ($f1) { $result.HostWritesGiB = [Math]::Round([double]$f1.Raw, 2) }
+            $result.Source = 'Phison F1 Lifetime_Writes_GiB'
+        }
+        'SanDisk' {
+            $logicalBlockSize = 0L
+            $blockSizeProperty = if ($null -ne $SmartData) { $SmartData.PSObject.Properties['logical_block_size'] } else { $null }
+            $hasLogicalBlockSize = (
+                $null -ne $blockSizeProperty -and
+                [long]::TryParse([string]$blockSizeProperty.Value, [ref]$logicalBlockSize) -and
+                $logicalBlockSize -ge 512 -and
+                $logicalBlockSize -le 4096 -and
+                ($logicalBlockSize -band ($logicalBlockSize - 1)) -eq 0
+            )
+            if ($hasLogicalBlockSize) {
+                if ($f1) { $result.HostWritesGiB = [Math]::Round(([decimal]$f1.Raw * $logicalBlockSize / 1GB), 2) }
+                if ($f2) { $result.HostReadsGiB = [Math]::Round(([decimal]$f2.Raw * $logicalBlockSize / 1GB), 2) }
+            }
+            $nandTlc = $Attributes | Where-Object { $_.ID -eq 0xE9 } | Select-Object -First 1
+            $nandSlc = $Attributes | Where-Object { $_.ID -eq 0xEA } | Select-Object -First 1
+            if ($nandTlc -or $nandSlc) {
+                $result.NandWritesGiB = [Math]::Round(
+                    $(if ($nandTlc) { [double]$nandTlc.Raw } else { 0 }) +
+                    $(if ($nandSlc) { [double]$nandSlc.Raw } else { 0 }),
+                    2
+                )
+            }
+            $result.Source = if ($hasLogicalBlockSize) {
+                "SanDisk/WD F1/F2 (LBAs x $logicalBlockSize bytes) and E9/EA (GiB)"
+            } else {
+                'SanDisk/WD E9/EA only; F1/F2 LBA conversion requires logical block size'
+            }
+        }
+        'PatriotBurst' {
+            $nandF9 = $Attributes | Where-Object { $_.ID -eq 0xF9 } | Select-Object -First 1
+            if ($nandF9) { $result.NandWritesGiB = [Math]::Round([double]$nandF9.Raw, 2) }
+            $result.Source = 'Patriot Burst F9 NAND writes (GiB)'
+        }
+    }
+
+    if ($null -ne $result.HostWritesGiB -and $result.HostWritesGiB -gt 0 -and $null -ne $result.NandWritesGiB) {
+        $result.WriteAmplification = [Math]::Round($result.NandWritesGiB / $result.HostWritesGiB, 2)
+    }
+    $result.IsSupported = [bool](
+        $null -ne $result.HostReadsGiB -or
+        $null -ne $result.HostWritesGiB -or
+        $null -ne $result.NandWritesGiB
+    )
+    return [PSCustomObject]$result
+}
+
 # Λογική επίλυσης ονομάτων attributes ανάλογα με το επιβεβαιωμένο controller profile
 function Get-AttributeName {
     param(
         [int]$id,
         [string]$brand
     )
-    if ($brand -eq "Samsung") {
+    if ($brand -eq 'KingstonUV400') {
+        # Kingston SUV400S37 SMART Attribute Details (MKP-521.3). IDs omitted
+        # from that vendor specification remain visible but deliberately opaque.
+        switch ($id) {
+            0x01 { return "Read Error Rate" }
+            0x05 { return "Reallocated Sector Count" }
+            0x09 { return "Power On Hours" }
+            0x0C { return "Power Cycle Count" }
+            0xAA { return "Used Reserved Block Count" }
+            0xAB { return "Program Fail Count" }
+            0xAC { return "Erase Fail Count" }
+            0xAE { return "Unexpected Power Off Count" }
+            0xAF { return "Program Fail Count Worst Die" }
+            0xB0 { return "Erase Fail Count Worst Die" }
+            0xB2 { return "Used Reserved Block Count Worst Die" }
+            0xB4 { return "Unused Reserved Block Count (SSD Total)" }
+            0xBB { return "Reported Uncorrectable Errors" }
+            0xC2 { return "Temperature" }
+            0xC3 { return "On-the-Fly ECC Error Event Count" }
+            0xC4 { return "Reallocation Event Count" }
+            0xC5 { return "Pending Sector Count" }
+            0xC7 { return "UDMA CRC Error Count" }
+            0xC9 { return "Uncorrectable Read Error Rate" }
+            0xCC { return "Soft ECC Correction Rate" }
+            0xE7 { return "SSD Life Left" }
+            0xF1 { return "GB Written from Interface" }
+            0xF2 { return "GB Read from Interface" }
+            0xFA { return "Total Number of NAND Read Retries" }
+            default { return "Vendor-specific (not in Kingston spec)" }
+        }
+    }
+    elseif ($brand -eq "Samsung") {
         switch ($id) {
             0xAF { return "Program Fail Count (Chip)" }
             0xB0 { return "Erase Fail Count (Chip)" }
@@ -1540,6 +2483,10 @@ function Get-AttributeName {
     }
     elseif ($brand -eq 'SiliconMotionOEM') {
         switch ($id) {
+            0x94 { return "SLC Total Erase Count" }
+            0x95 { return "SLC Maximum Erase Count" }
+            0x96 { return "SLC Minimum Erase Count" }
+            0x97 { return "SLC Average Erase Count" }
             0xA0 { return "Uncorrectable Error Count" }
             0xA1 { return "Valid Spare Block Count" }
             0xA3 { return "Initial Bad Block Count" }
@@ -1610,8 +2557,9 @@ function Get-AttributeName {
             0xE8 { return "Available Reserved Space" }
             0xE9 { return "NAND GB Written (TLC)" }
             0xEA { return "NAND GB Written (SLC)" }
-            0xF1 { return "Host Writes (GiB)" }
-            0xF2 { return "Host Reads (GiB)" }
+            0xEE { return "Media Wearout Cycles Remaining" }
+            0xF1 { return "Host Writes (LBAs)" }
+            0xF2 { return "Host Reads (LBAs)" }
             0xF4 { return "Temperature Throttle Status" }
         }
     }
@@ -1658,6 +2606,25 @@ function Get-AttributeName {
         0xC7 { return "UltraDMA CRC Error Count" }
         0xE9 { return "Normalized Media Wear-out" }
         default { return "Unknown Attribute" }
+    }
+}
+
+function Test-AtaRawWarningAttribute {
+    param(
+        [Parameter(Mandatory)][Alias('Profile')][string]$TelemetryProfile,
+        [Parameter(Mandatory)][int]$AttributeId
+    )
+
+    $commonErrorIds = @(0x05, 0xB8, 0xBB, 0xBC, 0xC4, 0xC5, 0xC6)
+    if ($AttributeId -in $commonErrorIds) { return $true }
+
+    switch ($TelemetryProfile) {
+        'Samsung'         { return $AttributeId -eq 0xB7 }
+        'SiliconMotionOEM'{ return $AttributeId -in @(0xA0, 0xB2) }
+        'PatriotBurst'    { return $AttributeId -in @(0xAB, 0xAC) }
+        'KingstonUV400'   { return $AttributeId -in @(0xAB, 0xAC) }
+        'SanDisk'         { return $AttributeId -in @(0xAA, 0xAB, 0xAC) }
+        default           { return $false }
     }
 }
 
@@ -1797,8 +2764,11 @@ if ($FilePath) {
         try {
             Import-DiskHealthWinRMDiscovery -StateRoot $DiscoveryStateRoot
             if ([string]::IsNullOrWhiteSpace($ConnectionNetworkId)) {
+                $identityToken = Start-DiskHealthPerformanceStage -Stage 'History.NetworkIdentity.Connection' -ParentStage 'Network.Authentication'
                 $ConnectionNetworkId = (Get-WinRMNetworkIdentity).NetworkId
+                Complete-DiskHealthPerformanceStage -Token $identityToken -Status success -ResultCount 1
             }
+            $historyToken = Start-DiskHealthPerformanceStage -Stage 'History.ConnectionLookup' -ParentStage 'Network.Authentication'
             $matchingHistory = Get-WinRMConnectionHistory -NetworkId $ConnectionNetworkId |
                 Where-Object {
                     $_.ComputerName -eq $ComputerName -or
@@ -1806,6 +2776,7 @@ if ($FilePath) {
                     $_.ComputerName -eq $ConnectionDisplayName
                 } |
                 Select-Object -First 1
+            Complete-DiskHealthPerformanceStage -Token $historyToken -Status success -ResultCount ([int]($null -ne $matchingHistory))
             if ($matchingHistory) {
                 $connectionAliases = @(
                     @($connectionAliases) + @(
@@ -1820,7 +2791,10 @@ if ($FilePath) {
                 }
             }
             if ($null -eq $Credential -and [string]::IsNullOrWhiteSpace($Password)) {
+                Show-DiskHealthPerformanceProgress -Stage 'Credential.DPAPILookup' -Message 'Checking the network-scoped encrypted profile.'
+                $credentialLookupToken = Start-DiskHealthPerformanceStage -Stage 'Credential.DPAPILookup.Connection' -ParentStage 'Network.Authentication'
                 $Credential = Get-DiskHealthStoredCredential -NetworkId $ConnectionNetworkId -ComputerNames $connectionAliases
+                Complete-DiskHealthPerformanceStage -Token $credentialLookupToken -Status success -ResultCount ([int]($null -ne $Credential))
                 if ($Credential) {
                     $CredentialFromSavedProfile = $true
                     $Username = $Credential.UserName
@@ -1828,6 +2802,10 @@ if ($FilePath) {
                 }
             }
         } catch {
+            $historyCategory = Get-DiskHealthPerformanceErrorCategory $_
+            if ($null -ne $historyToken -and $historyToken.Watch.IsRunning) {
+                Complete-DiskHealthPerformanceStage -Token $historyToken -Status failure -ErrorCategory $historyCategory
+            }
             Write-Host "  ⚠️ Δεν φορτώθηκε το connection history: $($_.Exception.Message)" -ForegroundColor Yellow
         }
     }
@@ -1887,6 +2865,60 @@ if ($FilePath) {
             )
         }
 
+        function Test-SmartctlAtaLifeEvidence {
+            param([AllowNull()]$Payload)
+
+            if ($null -eq $Payload) {
+                return $false
+            }
+
+            $statisticsProperty = $Payload.PSObject.Properties['ata_device_statistics']
+            if ($null -ne $statisticsProperty -and $null -ne $statisticsProperty.Value) {
+                $ssdPage = @($statisticsProperty.Value.pages) |
+                    Where-Object { $null -ne $_.number -and [int]$_.number -eq 7 } |
+                    Select-Object -First 1
+                if ($null -ne $ssdPage) {
+                    $enduranceEntry = @($ssdPage.table) |
+                        Where-Object { $null -ne $_.offset -and [int]$_.offset -eq 8 } |
+                        Select-Object -First 1
+                    if ($null -ne $enduranceEntry -and $null -ne $enduranceEntry.flags -and $enduranceEntry.flags.valid -eq $true) {
+                        return $true
+                    }
+                }
+            }
+
+            $databaseProperty = $Payload.PSObject.Properties['in_smartctl_database']
+            $enduranceProperty = $Payload.PSObject.Properties['endurance_used']
+            return [bool](
+                $null -ne $databaseProperty -and
+                $databaseProperty.Value -eq $true -and
+                $null -ne $enduranceProperty -and
+                $null -ne $enduranceProperty.Value -and
+                $null -ne $enduranceProperty.Value.PSObject.Properties['current_percent']
+            )
+        }
+
+        function Get-SmartctlHealthArguments {
+            param(
+                [Parameter(Mandatory)][string]$Device,
+                [AllowEmptyString()][string]$DeviceType = 'auto',
+                [switch]$RequestAtaSsdStatistics
+            )
+
+            $nativeArguments = @('-a')
+            if ($RequestAtaSsdStatistics) {
+                # Page 7 is the standardized ATA Solid State Device Statistics
+                # page. It adds the endurance indicator without the broader
+                # log collection performed by smartctl -x.
+                $nativeArguments += @('-l', 'ssd')
+            }
+            if (-not [string]::IsNullOrWhiteSpace($DeviceType) -and $DeviceType -ne 'auto') {
+                $nativeArguments += @('-d', $DeviceType)
+            }
+            $nativeArguments += @($Device, '--json')
+            return $nativeArguments
+        }
+
         function Get-KnownUsbNvmeBridgeType {
             param(
                 [AllowNull()]
@@ -1913,22 +2945,73 @@ if ($FilePath) {
             return $null
         }
 
+        $collectorStartUtc = [datetime]::UtcNow
         $collectorWatch = [System.Diagnostics.Stopwatch]::StartNew()
         $benchmarkRows = [System.Collections.Generic.List[object]]::new()
+
+        function Add-CollectorBenchmark {
+            param(
+                [string]$Phase,
+                [System.Diagnostics.Stopwatch]$Watch,
+                [datetime]$StartUtc = [datetime]::UtcNow,
+                [string]$ParentStage = 'Collector.Total',
+                [ValidateSet('success', 'failure', 'timeout', 'skipped')][string]$Status = 'success',
+                [AllowNull()]$AttemptCount = $null,
+                [AllowNull()]$ResultCount = $null,
+                [string]$ErrorCategory = '',
+                [string]$Details = ''
+            )
+            if ($BenchmarkEnabled) {
+                $endUtc = [datetime]::UtcNow
+                $benchmarkRows.Add([PSCustomObject]@{
+                    Phase         = $Phase
+                    ParentStage   = $ParentStage
+                    StartUtc      = $StartUtc
+                    EndUtc        = $endUtc
+                    Milliseconds  = $Watch.Elapsed.TotalMilliseconds
+                    Status        = $Status
+                    AttemptCount  = $AttemptCount
+                    ResultCount   = $ResultCount
+                    ErrorCategory = $ErrorCategory
+                    Details       = $Details
+                })
+            }
+        }
+
+        $inventoryStartUtc = [datetime]::UtcNow
         $inventoryWatch = [System.Diagnostics.Stopwatch]::StartNew()
         $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        $queryStart = [datetime]::UtcNow; $queryWatch = [System.Diagnostics.Stopwatch]::StartNew()
         $disks = Get-CimInstance -ClassName Win32_DiskDrive
+        $queryWatch.Stop(); Add-CollectorBenchmark -Phase 'Collector.CIM.Win32DiskDrive' -Watch $queryWatch -StartUtc $queryStart -ResultCount (@($disks).Count)
+        $queryStart = [datetime]::UtcNow; $queryWatch = [System.Diagnostics.Stopwatch]::StartNew()
         $physicalDisks = Get-PhysicalDisk -ErrorAction SilentlyContinue
+        $queryWatch.Stop(); Add-CollectorBenchmark -Phase 'Collector.Storage.PhysicalDisk' -Watch $queryWatch -StartUtc $queryStart -ResultCount (@($physicalDisks).Count)
+        $queryStart = [datetime]::UtcNow; $queryWatch = [System.Diagnostics.Stopwatch]::StartNew()
         $allData = Get-CimInstance -ClassName MSStorageDriver_FailurePredictData -Namespace root\wmi -ErrorAction SilentlyContinue
+        $queryWatch.Stop(); Add-CollectorBenchmark -Phase 'Collector.WMI.FailurePredictData' -Watch $queryWatch -StartUtc $queryStart -ResultCount (@($allData).Count)
+        $queryStart = [datetime]::UtcNow; $queryWatch = [System.Diagnostics.Stopwatch]::StartNew()
         $allThresholds = Get-CimInstance -ClassName MSStorageDriver_FailurePredictThresholds -Namespace root\wmi -ErrorAction SilentlyContinue
+        $queryWatch.Stop(); Add-CollectorBenchmark -Phase 'Collector.WMI.FailurePredictThresholds' -Watch $queryWatch -StartUtc $queryStart -ResultCount (@($allThresholds).Count)
+        $queryStart = [datetime]::UtcNow; $queryWatch = [System.Diagnostics.Stopwatch]::StartNew()
         $partitions = Get-CimInstance -ClassName Win32_DiskPartition
+        $queryWatch.Stop(); Add-CollectorBenchmark -Phase 'Collector.CIM.Win32DiskPartition' -Watch $queryWatch -StartUtc $queryStart -ResultCount (@($partitions).Count)
+        $queryStart = [datetime]::UtcNow; $queryWatch = [System.Diagnostics.Stopwatch]::StartNew()
         $logicalToPart = Get-CimInstance -ClassName Win32_LogicalDiskToPartition
+        $queryWatch.Stop(); Add-CollectorBenchmark -Phase 'Collector.CIM.LogicalDiskMapping' -Watch $queryWatch -StartUtc $queryStart -ResultCount (@($logicalToPart).Count)
         $inventoryWatch.Stop()
         if ($BenchmarkEnabled) {
             $benchmarkRows.Add([PSCustomObject]@{
-                Phase        = 'Collector.Inventory'
-                Milliseconds = $inventoryWatch.Elapsed.TotalMilliseconds
-                Details      = "$(@($disks).Count) disks"
+                Phase         = 'Collector.Inventory'
+                ParentStage   = 'Collector.Total'
+                StartUtc      = $inventoryStartUtc
+                EndUtc        = [datetime]::UtcNow
+                Milliseconds  = $inventoryWatch.Elapsed.TotalMilliseconds
+                Status        = 'success'
+                AttemptCount  = 1
+                ResultCount   = @($disks).Count
+                ErrorCategory = ''
+                Details       = "$(@($disks).Count) disks"
             })
         }
 
@@ -1940,21 +3023,6 @@ if ($FilePath) {
         $smartctlScanLoaded = $false
         $smartctlScanData = $null
         $smartctlScanSummary = @()
-
-        function Add-CollectorBenchmark {
-            param(
-                [string]$Phase,
-                [System.Diagnostics.Stopwatch]$Watch,
-                [string]$Details = ''
-            )
-            if ($BenchmarkEnabled) {
-                $benchmarkRows.Add([PSCustomObject]@{
-                    Phase        = $Phase
-                    Milliseconds = $Watch.Elapsed.TotalMilliseconds
-                    Details      = $Details
-                })
-            }
-        }
 
         # Ανίχνευση του smartctl
         $smartctlPath = $null
@@ -2017,6 +3085,8 @@ if ($FilePath) {
             $isNVMe = ($physDisk -and $physDisk.BusType -eq "NVMe") -or ($disk.InterfaceType -like "*NVM*" -or $disk.InterfaceType -like "*Express*")
             if ($isNVMe) {
                 $standard = "NVM Express"
+                $pnpTelemetryStartUtc = [datetime]::UtcNow
+                $pnpTelemetryWatch = [System.Diagnostics.Stopwatch]::StartNew()
                 $pciDev = Get-PnpDevice -Class SCSIAdapter -ErrorAction SilentlyContinue | Where-Object {
                     $_.FriendlyName -like "*NVM*" -or $_.FriendlyName -like "*NVMe*"
                 } | Select-Object -First 1
@@ -2036,6 +3106,16 @@ if ($FilePath) {
                         $transferMode = "PCIe $cSpeed x$cWidth | PCIe $mSpeed x$mWidth"
                     }
                 }
+                $pnpTelemetryWatch.Stop()
+                Add-CollectorBenchmark `
+                    -Phase "Collector.PnPTelemetry.Disk$($disk.Index)" `
+                    -Watch $pnpTelemetryWatch `
+                    -StartUtc $pnpTelemetryStartUtc `
+                    -ResultCount ([int]($null -ne $pciDev))
+            } elseif ($BenchmarkEnabled) {
+                $skippedUtc = [datetime]::UtcNow
+                $skippedWatch = [System.Diagnostics.Stopwatch]::StartNew(); $skippedWatch.Stop()
+                Add-CollectorBenchmark -Phase "Collector.PnPTelemetry.Disk$($disk.Index)" -Watch $skippedWatch -StartUtc $skippedUtc -Status skipped -AttemptCount 0 -ResultCount 0
             }
 
             # Ανάκτηση δεδομένων από smartctl
@@ -2046,6 +3126,11 @@ if ($FilePath) {
             $resolvedModel = $disk.Model
             $resolvedSerial = $disk.SerialNumber.Trim()
             $resolvedFirmware = if ($physDisk) { $physDisk.FirmwareVersion } else { $disk.FirmwareRevision }
+            $requestAtaSsdStatistics = [bool](
+                -not $isNVMe -and
+                $physDisk -and
+                [string]$physDisk.MediaType -eq 'SSD'
+            )
             if ($smartctlPath -and $isAdmin) {
                 $rawOutput = $null
                 $parsedCheck = $null
@@ -2054,20 +3139,43 @@ if ($FilePath) {
                 # USB bridges frequently fail auto-detection. Go directly to the
                 # cached scan map and avoid a known-failing extra probe.
                 if (-not $isUsbDisk) {
+                    $autoStartUtc = [datetime]::UtcNow
                     $autoWatch = [System.Diagnostics.Stopwatch]::StartNew()
-                    $rawOutput = & $smartctlPath -a $smartctlDevice --json 2>$null
+                    $smartctlArguments = @(Get-SmartctlHealthArguments `
+                        -Device $smartctlDevice `
+                        -RequestAtaSsdStatistics:$requestAtaSsdStatistics)
+                    $rawOutput = & $smartctlPath @smartctlArguments 2>$null
+                    $autoExitCode = $LASTEXITCODE
                     $autoWatch.Stop()
-                    Add-CollectorBenchmark -Phase "Collector.SmartctlAuto.Disk$($disk.Index)" -Watch $autoWatch -Details $smartctlDevice
                     $parsedCheck = if ($rawOutput) { try { $rawOutput | ConvertFrom-Json } catch { $null } } else { $null }
+                    $autoSucceeded = Test-SmartctlTelemetryPayload -Payload $parsedCheck
+                    Add-CollectorBenchmark `
+                        -Phase "Collector.SmartctlHealth.Disk$($disk.Index).Attempt1" `
+                        -Watch $autoWatch `
+                        -StartUtc $autoStartUtc `
+                        -AttemptCount 1 `
+                        -ResultCount ([int]$autoSucceeded) `
+                        -Status $(if ($autoSucceeded) { 'success' } else { 'failure' }) `
+                        -ErrorCategory $(if ($autoSucceeded) { '' } else { "SmartctlExit$autoExitCode" })
                 }
 
                 if (-not (Test-SmartctlTelemetryPayload -Payload $parsedCheck)) {
                     if (-not $smartctlScanLoaded) {
+                        $scanStartUtc = [datetime]::UtcNow
                         $scanWatch = [System.Diagnostics.Stopwatch]::StartNew()
                         $scanOutput = & $smartctlPath --scan-open --json 2>$null
+                        $scanExitCode = $LASTEXITCODE
                         $scanWatch.Stop()
-                        Add-CollectorBenchmark -Phase 'Collector.SmartctlScanOpen' -Watch $scanWatch
                         $smartctlScanData = if ($scanOutput) { try { $scanOutput | ConvertFrom-Json } catch { $null } } else { $null }
+                        $scanSucceeded = $null -ne $smartctlScanData
+                        Add-CollectorBenchmark `
+                            -Phase 'Collector.SmartctlScanOpen' `
+                            -Watch $scanWatch `
+                            -StartUtc $scanStartUtc `
+                            -AttemptCount 1 `
+                            -ResultCount (@($smartctlScanData.devices).Count) `
+                            -Status $(if ($scanSucceeded) { 'success' } else { 'failure' }) `
+                            -ErrorCategory $(if ($scanSucceeded) { '' } else { "SmartctlExit$scanExitCode" })
                         $smartctlScanLoaded = $true
                         foreach ($scanCandidate in @($smartctlScanData.devices)) {
                             $scanIndex = Get-SmartctlWindowsDeviceIndex -DeviceName $scanCandidate.name
@@ -2078,6 +3186,7 @@ if ($FilePath) {
 
                     $knownUsbBridge = $null
                     if ($isUsbDisk) {
+                        $pnpStartUtc = [datetime]::UtcNow
                         $pnpWatch = [System.Diagnostics.Stopwatch]::StartNew()
                         $pnpAncestry = @()
                         $currentInstanceId = $disk.PNPDeviceID
@@ -2098,6 +3207,8 @@ if ($FilePath) {
                         Add-CollectorBenchmark `
                             -Phase "Collector.UsbBridge.Disk$($disk.Index)" `
                             -Watch $pnpWatch `
+                            -StartUtc $pnpStartUtc `
+                            -ResultCount ([int]($null -ne $knownUsbBridge)) `
                             -Details $(if ($knownUsbBridge) { $knownUsbBridge.UsbId } else { 'unknown' })
                     }
 
@@ -2126,10 +3237,25 @@ if ($FilePath) {
                     # Identity probing is a fallback only. Some SCSI wrappers take
                     # more than six seconds even for -i, while index mapping is exact.
                     if ($indexedDevices.Count -eq 0) {
+                        $identityStartUtc = [datetime]::UtcNow
                         $identityWatch = [System.Diagnostics.Stopwatch]::StartNew()
+                        $identityAttempt = 0
                         foreach ($candidate in @($scanData.devices)) {
+                            $identityAttempt++
+                            $singleIdentityStartUtc = [datetime]::UtcNow
+                            $singleIdentityWatch = [System.Diagnostics.Stopwatch]::StartNew()
                             $identityOutput = & $smartctlPath -i -d $candidate.type $candidate.name --json 2>$null
+                            $identityExitCode = $LASTEXITCODE
+                            $singleIdentityWatch.Stop()
                             $identity = if ($identityOutput) { try { $identityOutput | ConvertFrom-Json } catch { $null } } else { $null }
+                            Add-CollectorBenchmark `
+                                -Phase "Collector.SmartctlIdentity.Disk$($disk.Index).Attempt$identityAttempt" `
+                                -Watch $singleIdentityWatch `
+                                -StartUtc $singleIdentityStartUtc `
+                                -AttemptCount $identityAttempt `
+                                -ResultCount ([int]($null -ne $identity)) `
+                                -Status $(if ($null -ne $identity) { 'success' } else { 'failure' }) `
+                                -ErrorCategory $(if ($null -ne $identity) { '' } else { "SmartctlExit$identityExitCode" })
                             if (-not $identity) { continue }
 
                             $wmiSerial = $disk.SerialNumber -replace '\s+', ''
@@ -2145,7 +3271,7 @@ if ($FilePath) {
                             }
                         }
                         $identityWatch.Stop()
-                        Add-CollectorBenchmark -Phase "Collector.IdentityFallback.Disk$($disk.Index)" -Watch $identityWatch
+                        Add-CollectorBenchmark -Phase "Collector.IdentityFallback.Disk$($disk.Index)" -Watch $identityWatch -StartUtc $identityStartUtc -AttemptCount $identityAttempt -ResultCount $identityDevices.Count
                     }
 
                     # PhysicalDrive index is the deterministic Windows mapping and
@@ -2163,14 +3289,25 @@ if ($FilePath) {
                     if ($matchingDevices.Count -eq 1) {
                         $smartctlDevice = $matchingDevices[0].Scan.name
                         $smartctlType = $matchingDevices[0].EffectiveType
+                        $resolvedStartUtc = [datetime]::UtcNow
                         $resolvedWatch = [System.Diagnostics.Stopwatch]::StartNew()
-                        $rawOutput = & $smartctlPath -a -d $smartctlType $smartctlDevice --json 2>$null
+                        $smartctlArguments = @(Get-SmartctlHealthArguments `
+                            -Device $smartctlDevice `
+                            -DeviceType $smartctlType `
+                            -RequestAtaSsdStatistics:$requestAtaSsdStatistics)
+                        $rawOutput = & $smartctlPath @smartctlArguments 2>$null
+                        $resolvedExitCode = $LASTEXITCODE
                         $resolvedWatch.Stop()
-                        Add-CollectorBenchmark `
-                            -Phase "Collector.SmartctlResolved.Disk$($disk.Index)" `
-                            -Watch $resolvedWatch `
-                            -Details "$smartctlDevice -d $smartctlType"
                         $parsedCheck = if ($rawOutput) { try { $rawOutput | ConvertFrom-Json } catch { $null } } else { $null }
+                        $resolvedSucceeded = Test-SmartctlTelemetryPayload -Payload $parsedCheck
+                        Add-CollectorBenchmark `
+                            -Phase "Collector.SmartctlHealth.Disk$($disk.Index).BridgeRetry" `
+                            -Watch $resolvedWatch `
+                            -StartUtc $resolvedStartUtc `
+                            -AttemptCount 2 `
+                            -ResultCount ([int]$resolvedSucceeded) `
+                            -Status $(if ($resolvedSucceeded) { 'success' } else { 'failure' }) `
+                            -ErrorCategory $(if ($resolvedSucceeded) { '' } else { "SmartctlExit$resolvedExitCode" })
                     } elseif ($matchingDevices.Count -gt 1) {
                         $smartctlIssue = "Το smartctl επέστρεψε πολλαπλά candidates για PhysicalDrive$($disk.Index). Δεν έγινε αυθαίρετη επιλογή."
                     } else {
@@ -2212,15 +3349,22 @@ if ($FilePath) {
                 $smartctlIssue = "Η συλλογή smartctl δεν εκτελέστηκε χωρίς Administrator δικαιώματα."
             }
 
+            $needsNvmeReliabilityFallback = [bool]($isNVMe -and -not $smartctlData)
+            $needsAtaSsdReliabilityFallback = [bool](
+                -not $isNVMe -and
+                $physDisk -and
+                [string]$physDisk.MediaType -eq 'SSD' -and
+                -not (Test-SmartctlAtaLifeEvidence -Payload $parsedCheck)
+            )
             if (
                 $isAdmin -and
                 $physDisk -and
-                $isNVMe -and
-                -not $smartctlData -and
-                $physDisk.BusType -ne "USB"
+                $physDisk.BusType -ne "USB" -and
+                ($needsNvmeReliabilityFallback -or $needsAtaSsdReliabilityFallback)
             ) {
                 $reliabilityKey = [string]$physDisk.DeviceId
                 if (-not $reliabilityCounters.ContainsKey($reliabilityKey)) {
+                    $reliabilityStartUtc = [datetime]::UtcNow
                     $reliabilityWatch = [System.Diagnostics.Stopwatch]::StartNew()
                     $reliabilityCounters[$reliabilityKey] = Get-StorageReliabilityCounter `
                         -PhysicalDisk $physDisk `
@@ -2229,14 +3373,36 @@ if ($FilePath) {
                     Add-CollectorBenchmark `
                         -Phase "Collector.Reliability.Disk$($disk.Index)" `
                         -Watch $reliabilityWatch `
-                        -Details 'NVMe fallback'
+                        -StartUtc $reliabilityStartUtc `
+                        -ResultCount ([int]($null -ne $reliabilityCounters[$reliabilityKey])) `
+                        -Details $(if ($needsNvmeReliabilityFallback) { 'NVMe fallback' } else { 'ATA SSD wear fallback' })
                 }
                 $relCounter = $reliabilityCounters[$reliabilityKey]
             } elseif ($BenchmarkEnabled -and $physDisk -and $physDisk.BusType -eq "USB") {
                 $benchmarkRows.Add([PSCustomObject]@{
-                    Phase        = "Collector.Reliability.Disk$($disk.Index)"
-                    Milliseconds = 0
-                    Details      = 'Skipped USB timeout path'
+                    Phase         = "Collector.Reliability.Disk$($disk.Index)"
+                    ParentStage   = 'Collector.Total'
+                    StartUtc      = [datetime]::UtcNow
+                    EndUtc        = [datetime]::UtcNow
+                    Milliseconds  = 0
+                    Status        = 'skipped'
+                    AttemptCount  = 0
+                    ResultCount   = 0
+                    ErrorCategory = ''
+                    Details       = 'Skipped USB timeout path'
+                })
+            } elseif ($BenchmarkEnabled) {
+                $benchmarkRows.Add([PSCustomObject]@{
+                    Phase         = "Collector.Reliability.Disk$($disk.Index)"
+                    ParentStage   = 'Collector.Total'
+                    StartUtc      = [datetime]::UtcNow
+                    EndUtc        = [datetime]::UtcNow
+                    Milliseconds  = 0
+                    Status        = 'skipped'
+                    AttemptCount  = 0
+                    ResultCount   = 0
+                    ErrorCategory = ''
+                    Details       = 'Not required because primary telemetry was available'
                 })
             }
 
@@ -2277,10 +3443,31 @@ if ($FilePath) {
         }
         $collectorWatch.Stop()
         if ($BenchmarkEnabled) {
+            if (-not $smartctlScanLoaded) {
+                $benchmarkRows.Add([PSCustomObject]@{
+                    Phase         = 'Collector.SmartctlScanOpen'
+                    ParentStage   = 'Collector.Total'
+                    StartUtc      = [datetime]::UtcNow
+                    EndUtc        = [datetime]::UtcNow
+                    Milliseconds  = 0
+                    Status        = 'skipped'
+                    AttemptCount  = 0
+                    ResultCount   = 0
+                    ErrorCategory = ''
+                    Details       = 'Primary smartctl queries succeeded'
+                })
+            }
             $benchmarkRows.Add([PSCustomObject]@{
-                Phase        = 'Collector.Total'
-                Milliseconds = $collectorWatch.Elapsed.TotalMilliseconds
-                Details      = "$($results.Count) disks"
+                Phase         = 'Collector.Total'
+                ParentStage   = 'Remote.Collection'
+                StartUtc      = $collectorStartUtc
+                EndUtc        = [datetime]::UtcNow
+                Milliseconds  = $collectorWatch.Elapsed.TotalMilliseconds
+                Status        = 'success'
+                AttemptCount  = 1
+                ResultCount   = $results.Count
+                ErrorCategory = ''
+                Details       = "$($results.Count) disks"
             })
         }
 
@@ -2294,23 +3481,34 @@ if ($FilePath) {
     $session = $null
     try {
         if ($isLocal) {
+            $collectorInvokeStartUtc = [datetime]::UtcNow
             $collectorInvokeWatch = [System.Diagnostics.Stopwatch]::StartNew()
             $collectionPayload = Invoke-Command `
                 -ScriptBlock $scriptBlock `
                 -ArgumentList ([bool]$Benchmark)
             $collectorInvokeWatch.Stop()
-            Write-DiskHealthBenchmarkLine `
-                -Phase 'Collector.Invoke.Local' `
-                -Milliseconds $collectorInvokeWatch.Elapsed.TotalMilliseconds
+            Add-DiskHealthPerformanceRecord -Stage 'Collector.Invoke.Local' -ParentStage 'Collector.Total' -StartUtc $collectorInvokeStartUtc -EndUtc ([datetime]::UtcNow) -DurationMs $collectorInvokeWatch.Elapsed.TotalMilliseconds -Status success -AttemptCount 1 -ResultCount (@($collectionPayload.Disks).Count)
         } else {
             Import-DiskHealthWinRMWorkshop
-            $workshopPreparation = Add-WinRMWorkshopTrustedHost `
-                -ComputerName $ComputerName `
-                -OnStatus ${function:Write-DiskHealthWinRMWorkshopStatus}
+            Show-DiskHealthPerformanceProgress -Stage 'TrustedHosts.Preparation' -Message 'Preparing only the exact selected target.'
+            $workshopToken = Start-DiskHealthPerformanceStage -Stage 'TrustedHosts.ExactTargetPreparation' -ParentStage 'WinRM.Connect'
+            try {
+                $workshopPreparation = Add-WinRMWorkshopTrustedHost `
+                    -ComputerName $ComputerName `
+                    -OnStatus ${function:Write-DiskHealthWinRMWorkshopStatus}
+                Complete-DiskHealthPerformanceStage -Token $workshopToken -Status success -AttemptCount 1 -ResultCount ([int]$workshopPreparation.Verified)
+            } catch {
+                $workshopCategory = Get-DiskHealthPerformanceErrorCategory $_
+                Complete-DiskHealthPerformanceStage -Token $workshopToken -Status failure -AttemptCount 1 -ResultCount 0 -ErrorCategory $workshopCategory
+                throw
+            }
             if (-not $workshopPreparation.Verified) {
                 throw "Η exact-target TrustedHosts προετοιμασία απέτυχε για '$ComputerName'."
             }
 
+            $script:DiskHealthConnectionStageTokens = @{}
+            Show-DiskHealthPerformanceProgress -Stage 'WinRM.Connect' -Message 'TCP 5985 preflight and bounded authenticated attempts.'
+            $connectionToken = Start-DiskHealthPerformanceStage -Stage 'WinRM.NewPSSession' -ParentStage 'WinRM.Connect'
             $sessionWatch = [System.Diagnostics.Stopwatch]::StartNew()
             try {
                 $session = Connect-WinRMSession `
@@ -2318,9 +3516,11 @@ if ($FilePath) {
                     -Credential $cred `
                     -OnStatus ${function:Write-DiskHealthWinRMConnectionStatus}
                 $sessionWatch.Stop()
+                Complete-DiskHealthPerformanceStage -Token $connectionToken -Status success -AttemptCount $session.WinRMConnectionAttemptCount -ResultCount 1
             } catch {
                 $sessionWatch.Stop()
                 $connectionCategory = Get-WinRMConnectionErrorCategory -ErrorObject $_
+                Complete-DiskHealthPerformanceStage -Token $connectionToken -Status $(if ($connectionCategory -eq 'Timeout') { 'timeout' } else { 'failure' }) -AttemptCount $_.Exception.Data['WinRMConnectionAttemptCount'] -ResultCount 0 -ErrorCategory $connectionCategory
                 $isAuthError = $connectionCategory -eq 'AuthenticationRejected'
                 $isInteractive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
                 if ($isAuthError -and $CredentialFromSavedProfile -and -not [string]::IsNullOrWhiteSpace($ConnectionNetworkId)) {
@@ -2342,6 +3542,8 @@ if ($FilePath) {
 
                         Write-Host "  🔄 Προσπάθεια επανασύνδεσης με τα νέα στοιχεία..." -ForegroundColor $Cyan
                         try {
+                            $script:DiskHealthConnectionStageTokens = @{}
+                            $retryToken = Start-DiskHealthPerformanceStage -Stage 'WinRM.NewPSSession.Retry' -ParentStage 'WinRM.Connect'
                             $retryWatch = [System.Diagnostics.Stopwatch]::StartNew()
                             $session = Connect-WinRMSession `
                                 -ComputerName $ComputerName `
@@ -2351,11 +3553,10 @@ if ($FilePath) {
                             $cred = $promptCred
                             $CredentialFromSavedProfile = $false
                             $Username = $cred.UserName
-                            Write-DiskHealthBenchmarkLine `
-                                -Phase 'WinRM.NewPSSession.Retry' `
-                                -Milliseconds $retryWatch.Elapsed.TotalMilliseconds `
-                                -Details $ComputerName
+                            Complete-DiskHealthPerformanceStage -Token $retryToken -Status success -AttemptCount $session.WinRMConnectionAttemptCount -ResultCount 1
                         } catch {
+                            $retryCategory = Get-WinRMConnectionErrorCategory -ErrorObject $_
+                            Complete-DiskHealthPerformanceStage -Token $retryToken -Status $(if ($retryCategory -eq 'Timeout') { 'timeout' } else { 'failure' }) -AttemptCount $_.Exception.Data['WinRMConnectionAttemptCount'] -ResultCount 0 -ErrorCategory $retryCategory
                             Write-Host "  ❌ Αποτυχία σύνδεσης και με τα νέα στοιχεία." -ForegroundColor $Red
                             throw $_
                         }
@@ -2366,21 +3567,20 @@ if ($FilePath) {
                     throw $_
                 }
             }
-            Write-DiskHealthBenchmarkLine `
-                -Phase 'WinRM.NewPSSession' `
-                -Milliseconds $sessionWatch.Elapsed.TotalMilliseconds `
-                -Details $ComputerName
-
             if (-not [string]::IsNullOrWhiteSpace($ConnectionNetworkId)) {
+                $credentialSaveToken = Start-DiskHealthPerformanceStage -Stage 'Credential.DPAPISave' -ParentStage 'Network.Authentication'
                 Save-DiskHealthStoredCredential `
                     -NetworkId $ConnectionNetworkId `
                     -ComputerNames $connectionAliases `
                     -CredentialToStore $cred
+                Complete-DiskHealthPerformanceStage -Token $credentialSaveToken -Status success -ResultCount $connectionAliases.Count
                 Write-Host "  🔐 Το credential αποθηκεύτηκε με DPAPI για αυτό το PC και δίκτυο." -ForegroundColor $Green
             }
 
             # Detect the dependency first. Interactive users choose in-app;
             # -InstallSmartctl remains the non-interactive automation override.
+            Show-DiskHealthPerformanceProgress -Stage 'Remote.EnvironmentToolDetection' -Message 'Checking remote host identity and smartctl availability.'
+            $prerequisiteToken = Start-DiskHealthPerformanceStage -Stage 'WinRM.PrerequisiteProbe' -ParentStage 'Remote.Collection'
             $prerequisiteWatch = [System.Diagnostics.Stopwatch]::StartNew()
             $remoteInfo = Invoke-Command -Session $session -ScriptBlock {
                 $paths = @(
@@ -2400,10 +3600,7 @@ if ($FilePath) {
                 }
             }
             $prerequisiteWatch.Stop()
-            Write-DiskHealthBenchmarkLine `
-                -Phase 'WinRM.PrerequisiteProbe' `
-                -Milliseconds $prerequisiteWatch.Elapsed.TotalMilliseconds `
-                -Details "$($remoteInfo.ComputerName); smartctl=$($remoteInfo.SmartctlExists)"
+            Complete-DiskHealthPerformanceStage -Token $prerequisiteToken -Status success -ResultCount 1
             $remoteSmartctlExists = [bool]$remoteInfo.SmartctlExists
 
             $installSmartctlNow = [bool]$InstallSmartctl
@@ -2490,16 +3687,15 @@ if ($FilePath) {
                 }
             }
 
+            Show-DiskHealthPerformanceProgress -Stage 'Remote.DiskCollection' -Message 'Enumerating disks and collecting read-only telemetry.'
+            $collectorInvokeStartUtc = [datetime]::UtcNow
             $collectorInvokeWatch = [System.Diagnostics.Stopwatch]::StartNew()
             $collectionPayload = Invoke-Command `
                 -Session $session `
                 -ScriptBlock $scriptBlock `
                 -ArgumentList ([bool]$Benchmark)
             $collectorInvokeWatch.Stop()
-            Write-DiskHealthBenchmarkLine `
-                -Phase 'Collector.Invoke.Remote' `
-                -Milliseconds $collectorInvokeWatch.Elapsed.TotalMilliseconds `
-                -Details $ComputerName
+            Add-DiskHealthPerformanceRecord -Stage 'Collector.Invoke.Remote' -ParentStage 'Remote.Collection' -StartUtc $collectorInvokeStartUtc -EndUtc ([datetime]::UtcNow) -DurationMs $collectorInvokeWatch.Elapsed.TotalMilliseconds -Status success -AttemptCount 1 -ResultCount (@($collectionPayload.Disks).Count)
 
             if (-not [string]::IsNullOrWhiteSpace($ConnectionNetworkId)) {
                 $resolvedComputerName = if (
@@ -2542,20 +3738,33 @@ if ($FilePath) {
 
         $collected = @($collectionPayload.Disks)
         foreach ($benchmarkRow in @($collectionPayload.Benchmarks)) {
-            Write-DiskHealthBenchmarkLine `
-                -Phase ([string]$benchmarkRow.Phase) `
-                -Milliseconds ([double]$benchmarkRow.Milliseconds) `
-                -Details ([string]$benchmarkRow.Details)
+            $benchmarkEndUtc = if ($benchmarkRow.PSObject.Properties['EndUtc']) { [datetime]$benchmarkRow.EndUtc } else { [datetime]::UtcNow }
+            $benchmarkStartUtc = if ($benchmarkRow.PSObject.Properties['StartUtc']) { [datetime]$benchmarkRow.StartUtc } else { $benchmarkEndUtc.AddMilliseconds(-[double]$benchmarkRow.Milliseconds) }
+            Add-DiskHealthPerformanceRecord `
+                -Stage ([string]$benchmarkRow.Phase) `
+                -ParentStage $(if ($benchmarkRow.PSObject.Properties['ParentStage']) { [string]$benchmarkRow.ParentStage } else { 'Collector.Total' }) `
+                -StartUtc $benchmarkStartUtc `
+                -EndUtc $benchmarkEndUtc `
+                -DurationMs ([double]$benchmarkRow.Milliseconds) `
+                -Status $(if ($benchmarkRow.PSObject.Properties['Status']) { [string]$benchmarkRow.Status } else { 'success' }) `
+                -AttemptCount $(if ($benchmarkRow.PSObject.Properties['AttemptCount']) { $benchmarkRow.AttemptCount } else { $null }) `
+                -ResultCount $(if ($benchmarkRow.PSObject.Properties['ResultCount']) { $benchmarkRow.ResultCount } else { $null }) `
+                -ErrorCategory $(if ($benchmarkRow.PSObject.Properties['ErrorCategory']) { [string]$benchmarkRow.ErrorCategory } else { '' })
         }
         $operationWatch.Stop()
-        Write-DiskHealthBenchmarkLine `
-            -Phase 'Operation.Total' `
-            -Milliseconds $operationWatch.Elapsed.TotalMilliseconds `
-            -Details $(if ($isLocal) { 'localhost' } else { $ComputerName })
+        Add-DiskHealthPerformanceRecord -Stage 'Operation.Total' -ParentStage 'Run' -StartUtc ([datetime]::UtcNow.AddMilliseconds(-$operationWatch.Elapsed.TotalMilliseconds)) -EndUtc ([datetime]::UtcNow) -DurationMs $operationWatch.Elapsed.TotalMilliseconds -Status success -AttemptCount 1 -ResultCount $collected.Count
         if ($Benchmark -and -not [string]::IsNullOrWhiteSpace($script:DiskHealthBenchmarkLogPath)) {
             Write-Host "  ⏱️ Benchmark log: $script:DiskHealthBenchmarkLogPath" -ForegroundColor DarkGray
         }
     } catch {
+        $operationCategory = Get-DiskHealthPerformanceErrorCategory $_
+        $failureEndUtc = [datetime]::UtcNow
+        Add-DiskHealthPerformanceRecord -Stage 'Operation.Failure' -ParentStage 'Operation.Total' -StartUtc $failureEndUtc -EndUtc $failureEndUtc -DurationMs 0 -Status failure -ErrorCategory $operationCategory
+        if ($EmbeddedRemote) {
+            Save-DiskHealthPerformanceReport
+        } else {
+            Save-DiskHealthPerformanceReport -Finalize -ShowSummary
+        }
         Write-Host "❌ Σφάλμα κατά τη σύνδεση ή τη συλλογή δεδομένων: $_" -ForegroundColor $Red
         return
     } finally {
@@ -2644,6 +3853,8 @@ while ($runLoop) {
 
     # 3. Ανάλυση και Παρουσίαση για κάθε δίσκο. Capture Write-Host's structured
     # information records so the same diagnostic logic can feed a resize-safe TUI.
+    Show-DiskHealthPerformanceProgress -Stage 'Evaluation.HealthParsing' -Message 'Parsing telemetry and evaluating health evidence.'
+    $evaluationToken = Start-DiskHealthPerformanceStage -Stage 'Evaluation.HealthParsing' -ParentStage 'Report'
     $reportRecords = @(
     & {
     foreach ($disk in $selectedDrives) {
@@ -2990,11 +4201,15 @@ while ($runLoop) {
         $health = 100 - $wear05.Raw
         $healthSource = "Percentage Used (0x05)"
     } elseif ($brand -ne 'NVMe') {
-        $ataHealth = Get-AtaHealthEstimate -Profile $brand -Attributes $attributes
-        if ($ataHealth.IsTrusted) {
-            $health = $ataHealth.Percentage
-            $healthSource = $ataHealth.Source
-            $healthMetricLabel = $ataHealth.MetricLabel
+        $ataLife = Get-AtaLifeEstimate `
+            -SmartData $smart `
+            -Profile $brand `
+            -Attributes $attributes `
+            -ReliabilityCounter $disk.ReliabilityCounter
+        if ($ataLife.IsTrusted) {
+            $health = $ataLife.Percentage
+            $healthSource = $ataLife.Source
+            $healthMetricLabel = $ataLife.MetricLabel
         }
     }
 
@@ -3043,13 +4258,13 @@ while ($runLoop) {
             $cautionReasons += "Uncorrectable Sectors Read/Write ($($uncorrectableA0.Raw))"
             $hasActiveMediaErrors = $true
         }
-        if ($runtimeB2 -and $runtimeB2.Raw -gt 0) {
+        if ($runtimeB2 -and $runtimeB2.Raw -gt 0 -and (Test-AtaRawWarningAttribute -Profile $brand -AttributeId 0xB2)) {
             $status = "CAUTION"
             $statusColor = $Yellow
             $statusIcon = "⚠️"
             $cautionReasons += "Runtime Invalid Blocks ($($runtimeB2.Raw))"
         }
-        if ($runtimeB7 -and $runtimeB7.Raw -gt 0) {
+        if ($runtimeB7 -and $runtimeB7.Raw -gt 0 -and (Test-AtaRawWarningAttribute -Profile $brand -AttributeId 0xB7)) {
             $status = "CAUTION"
             $statusColor = $Yellow
             $statusIcon = "⚠️"
@@ -3082,14 +4297,14 @@ while ($runLoop) {
             $cautionReasons += "Offline Uncorrectable Errors ($($uncorrectableC6.Raw))"
             $hasActiveMediaErrors = $true
         }
-        if ($brand -eq 'SanDisk' -and $programFailAB -and $programFailAB.Raw -gt 0) {
+        if ($programFailAB -and $programFailAB.Raw -gt 0 -and (Test-AtaRawWarningAttribute -Profile $brand -AttributeId 0xAB)) {
             $status = "CAUTION"
             $statusColor = $Yellow
             $statusIcon = "⚠️"
             $cautionReasons += "Program Fail Count ($($programFailAB.Raw))"
             $hasActiveMediaErrors = $true
         }
-        if ($brand -eq 'SanDisk' -and $eraseFailAC -and $eraseFailAC.Raw -gt 0) {
+        if ($eraseFailAC -and $eraseFailAC.Raw -gt 0 -and (Test-AtaRawWarningAttribute -Profile $brand -AttributeId 0xAC)) {
             $status = "CAUTION"
             $statusColor = $Yellow
             $statusIcon = "⚠️"
@@ -3137,6 +4352,13 @@ while ($runLoop) {
         }
     }
 
+    if ($status -eq 'GOOD' -and -not $isRotationalMedia -and $null -eq $health) {
+        $status = 'REVIEW'
+        $statusColor = $Yellow
+        $statusIcon = '🔎'
+        $cautionReasons += 'No trustworthy SSD lifetime reading was available'
+    }
+
     # Health % color code
     $healthPercentColor = $Green
     if ($status -ne "GOOD") {
@@ -3149,9 +4371,14 @@ while ($runLoop) {
     Write-Host "  $statusIcon Κατάσταση: " -NoNewline -ForegroundColor $White
     Write-Host "$status " -NoNewline -ForegroundColor $statusColor
     Write-Host "(" -NoNewline -ForegroundColor $White
-    $healthDisplay = if ($null -eq $health -and $isRotationalMedia) { 'SMART' } elseif ($null -eq $health) { 'N/A' } elseif ($healthMetricLabel -eq 'Health') { "$health%" } else { "$healthMetricLabel $health%" }
+    $healthDisplay = if ($null -eq $health -and $isRotationalMedia) { 'SMART' } elseif ($null -eq $health) { 'UNSUPPORTED' } elseif ($healthMetricLabel -eq 'Health') { "$health%" } else { "$healthMetricLabel $health%" }
     Write-Host $healthDisplay -NoNewline -ForegroundColor $healthPercentColor
     Write-Host ")" -ForegroundColor $White
+
+    $diagnosticSupported = [bool]($isRotationalMedia -or $null -ne $health)
+    Write-Host "  🔸 Υποστήριξη διάγνωσης: " -NoNewline -ForegroundColor $White
+    Write-Host $(if ($diagnosticSupported) { 'SUPPORTED' } else { 'UNSUPPORTED' }) `
+        -ForegroundColor $(if ($diagnosticSupported) { $Green } else { $Yellow })
 
     if ($status -eq "GOOD") {
         if ($isRotationalMedia) {
@@ -3161,17 +4388,22 @@ while ($runLoop) {
                 Write-WrappedConsoleText -Text "Seagate 01/07/C3: τα individual values είναι proprietary. Score πάνω από Fail <= σημαίνει μόνο ότι δεν ενεργοποιήθηκε failure condition· δεν αποδεικνύει από μόνο του φυσιολογική κατάσταση." -FirstPrefix "  🔸 " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
             }
         } elseif ($null -eq $health) {
-            Write-Host "  🔸 Το SMART overall status είναι επιτυχές, αλλά δεν υπάρχει αξιόπιστο vendor mapping για ποσοστό ζωής NAND." -ForegroundColor $Gray
+            Write-Host "  ⚠️ UNSUPPORTED: Το SMART overall status πέρασε, αλλά δεν βρέθηκε αξιόπιστη ένδειξη υπολειπόμενης ζωής SSD." -ForegroundColor $Yellow
         } else {
             Write-Host "  🔸 Ο δίσκος εμφανίζει φυσιολογική φθορά της NAND flash μνήμης (πηγή: $healthSource)." -ForegroundColor $Gray
         }
         Write-Host "  🔸 Δεν ανιχνεύθηκαν ενεργά SMART failure indicators κατά τη συγκεκριμένη συλλογή." -ForegroundColor $Gray
     } elseif ($status -eq "REVIEW") {
-        Write-Host "  🔎 ΑΠΑΙΤΕΙ ΕΛΕΓΧΟ: Εντοπίστηκε ασυνεπής NVMe telemetry που δεν πρέπει να μετατραπεί ούτε σε 0 ούτε σε αυτόματη αστοχία:" -ForegroundColor $Yellow
-        foreach ($r in $cautionReasons) {
-            Write-Host "     - $r" -ForegroundColor $Yellow
+        if (-not $diagnosticSupported) {
+            Write-Host "  ⚠️ UNSUPPORTED: Το SMART overall status πέρασε, αλλά δεν βρέθηκε αξιόπιστη ένειξη υπολειπόμενης ζωής SSD." -ForegroundColor $Yellow
+            Write-Host "  🔸 Δεν εκδίδεται health percentage ή βέβαιο GOOD συμπέρασμα χωρίς τέτοιο evidence." -ForegroundColor $Gray
+        } else {
+            Write-Host "  🔎 ΑΠΑΙΤΕΙ ΕΛΕΓΧΟ: Εντοπίστηκε ασυνεπής NVMe telemetry που δεν πρέπει να μετατραπεί ούτε σε 0 ούτε σε αυτόματη αστοχία:" -ForegroundColor $Yellow
+            foreach ($r in $cautionReasons) {
+                Write-Host "     - $r" -ForegroundColor $Yellow
+            }
+            Write-Host "  🔸 Η ένδειξη ζωής NAND παραμένει ανεξάρτητη από αυτή την ανωμαλία. Απαιτείται επιβεβαίωση με raw log, firmware/vendor στοιχεία και διαγνωστικό test." -ForegroundColor $Gray
         }
-        Write-Host "  🔸 Η ένδειξη ζωής NAND παραμένει ανεξάρτητη από αυτή την ανωμαλία. Απαιτείται επιβεβαίωση με raw log, firmware/vendor στοιχεία και διαγνωστικό test." -ForegroundColor $Gray
     } elseif ($status -eq "CAUTION") {
         Write-Host "  ⚠️ ΠΡΟΣΟΧΗ: Εντοπίστηκαν προβλήματα στα παρακάτω κρίσιμα attributes:" -ForegroundColor $Yellow
         foreach ($r in $cautionReasons) {
@@ -3260,6 +4492,15 @@ while ($runLoop) {
                 # Passing one proprietary attribute is not a green health claim.
                 if ($seagateRateState -eq 'ThresholdCrossed') { $lineColor = $Red }
                 else { $lineColor = $Gray }
+            } elseif ($brand -eq 'KingstonUV400') {
+                if ($attr.ID -eq 0xE7) {
+                    if ($attr.Threshold -gt 0 -and $attr.Current -le $attr.Threshold) { $lineColor = $Red }
+                    elseif ($attr.Current -le 10) { $lineColor = $Red }
+                    elseif ($attr.Current -le 60) { $lineColor = $Yellow }
+                    else { $lineColor = $Green }
+                } elseif (Test-AtaRawWarningAttribute -Profile $brand -AttributeId $attr.ID) {
+                    $lineColor = if ($attr.Raw -gt 0) { $Yellow } else { $Green }
+                }
             } elseif ($brand -eq 'SanDisk') {
                 $sanDiskErrorIds = @(0x05, 0xAA, 0xAB, 0xAC, 0xB8, 0xBB, 0xBC, 0xC4, 0xC5, 0xC6)
                 if ($attr.ID -in $sanDiskErrorIds) {
@@ -3270,13 +4511,18 @@ while ($runLoop) {
                     else { $lineColor = $Green }
                 }
             } else {
-                $isCriticalAttr = ($attr.ID -eq 0x01 -or $attr.ID -eq 0x05 -or $attr.ID -eq 0xA0 -or $attr.ID -eq 0xA1 -or $attr.ID -eq 0xB1 -or $attr.ID -eq 0xB2 -or $attr.ID -eq 0xB7 -or $attr.ID -eq 0xB8 -or $attr.ID -eq 0xBB -or $attr.ID -eq 0xBC -or $attr.ID -eq 0xC4 -or $attr.ID -eq 0xC5 -or $attr.ID -eq 0xC6 -or $attr.ID -eq 0xE8 -or $attr.ID -eq 0xE9 -or $attr.ID -eq 0xA9)
-                if ($isCriticalAttr) {
+                $isCriticalAttr = Test-AtaRawWarningAttribute -Profile $brand -AttributeId $attr.ID
+                $isWearAttr = (
+                    ($brand -eq 'Samsung' -and $attr.ID -eq 0xB1) -or
+                    ($brand -in @('SiliconMotionOEM', 'PatriotBurst') -and $attr.ID -eq 0xA9) -or
+                    ($brand -eq 'Phison' -and $attr.ID -eq 0xE7)
+                )
+                if ($isCriticalAttr -or $isWearAttr) {
                     $isProblematic = $false
                     $isFailed = $false
 
-                    if ($attr.ID -eq 0xA9 -or $attr.ID -eq 0xB1 -or $attr.ID -eq 0xE9 -or $attr.ID -eq 0xE8 -or $attr.ID -eq 0xA1) {
-                        $val = if ($attr.ID -eq 0xA9) { $attr.Raw } else { $attr.Current }
+                    if ($isWearAttr) {
+                        $val = if ($attr.ID -in @(0xA9, 0xE7)) { $attr.Raw } else { $attr.Current }
                         if ($val -le 10) { $isFailed = $true }
                         elseif ($val -le 60) { $isProblematic = $true }
                     } else {
@@ -3366,8 +4612,12 @@ while ($runLoop) {
             Write-Host "  💡 Συμβουλή: Η τήρηση τακτικού backup παραμένει standard πρακτική." -ForegroundColor $Gray
         }
     } elseif ($status -eq "REVIEW") {
-        Write-Host "  🔎 Η εκτίμηση ζωής NAND είναι $health%, αλλά υπάρχει ασυνεπής raw NVMe telemetry." -ForegroundColor $Yellow
-        Write-Host "  ⚠️ Μην αποφασίσετε αντικατάσταση ή αθώωση του δίσκου μόνο από αυτό το counter. Διατηρήστε backup και εκτελέστε πρόσθετο non-destructive validation." -ForegroundColor $Yellow
+        if (-not $diagnosticSupported) {
+            Write-Host "  ⚠️ SSD health diagnosis: UNSUPPORTED. Διατηρήστε backup και μη βασίζετε απόφαση σε αυτό το snapshot." -ForegroundColor $Yellow
+        } else {
+            Write-Host "  🔎 Η εκτίμηση ζωής NAND είναι $health%, αλλά υπάρχει ασυνεπής raw NVMe telemetry." -ForegroundColor $Yellow
+            Write-Host "  ⚠️ Μην αποφασίσετε αντικατάσταση ή αθώωση του δίσκου μόνο από αυτό το counter. Διατηρήστε backup και εκτελέστε πρόσθετο non-destructive validation." -ForegroundColor $Yellow
+        }
     } elseif ($status -eq "CAUTION") {
         if ($brand -eq 'SanDisk' -and $retiredBlocksOnly -and -not $hasActiveMediaErrors) {
             Write-Host "  ⚠️ Έχουν αποσυρθεί NAND blocks, όμως η συγκεκριμένη συλλογή δεν αποδεικνύει ότι η φθορά συνεχίζεται τώρα." -ForegroundColor $Yellow
@@ -3382,6 +4632,35 @@ while ($runLoop) {
     } else {
         Write-Host "  🚨 Ο δίσκος βρίσκεται σε κρίσιμη κατάσταση αστοχίας." -ForegroundColor $Red
         Write-Host "  🚨 ALL CAPS: ΑΝΤΙΚΑΤΑΣΤΗΣΤΕ ΤΟΝ ΔΙΣΚΟ ΑΜΕΣΑ ΓΙΑ ΑΠΟΦΥΓΗ ΑΠΩΛΕΙΑΣ ΔΕΔΟΜΕΝΩΝ." -ForegroundColor $Red
+    }
+
+    if ($brand -ne 'NVMe' -and -not $isRotationalMedia) {
+        $dataTotals = Get-AtaDataTransferEstimate -Profile $brand -Attributes $attributes -SmartData $smart
+        if ($dataTotals.IsSupported) {
+            Write-Host "`n  🔵 Lifetime Data Totals:" -ForegroundColor $Cyan
+            if ($null -ne $dataTotals.HostReadsGiB) {
+                Write-Host "  🔸 Host Reads: " -NoNewline -ForegroundColor $White
+                Write-Host (("{0:N2} GiB ({1:N2} TiB)" -f $dataTotals.HostReadsGiB, ($dataTotals.HostReadsGiB / 1024))) -ForegroundColor $Gray
+            }
+            if ($null -ne $dataTotals.HostWritesGiB) {
+                Write-Host "  🔸 Host Writes: " -NoNewline -ForegroundColor $White
+                Write-Host (("{0:N2} GiB ({1:N2} TiB)" -f $dataTotals.HostWritesGiB, ($dataTotals.HostWritesGiB / 1024))) -ForegroundColor $Gray
+            }
+            if ($null -ne $dataTotals.NandWritesGiB) {
+                Write-Host "  🔸 NAND Writes: " -NoNewline -ForegroundColor $White
+                Write-Host (("{0:N2} GiB ({1:N2} TiB)" -f $dataTotals.NandWritesGiB, ($dataTotals.NandWritesGiB / 1024))) -ForegroundColor $Gray
+            }
+            if ($null -ne $dataTotals.WriteAmplification) {
+                Write-Host "  🔸 Lifetime Write Amplification: " -NoNewline -ForegroundColor $White
+                Write-Host "$($dataTotals.WriteAmplification)`x" -ForegroundColor $(if ($dataTotals.WriteAmplification -gt 3) { $Yellow } else { $Gray })
+                if ($dataTotals.WriteAmplification -gt 3) {
+                    Write-Host "     Υψηλό lifetime WAF: συμβατό με SLC-cache folding, garbage collection σε υψηλή πληρότητα ή/και wear leveling." -ForegroundColor $Yellow
+                }
+            }
+            Write-Host "  🔸 Counter source: $($dataTotals.Source)" -ForegroundColor $Gray
+        } else {
+            Write-Host "`n  ⚠️ Lifetime Data Totals: UNSUPPORTED (unknown raw counter units)." -ForegroundColor $Yellow
+        }
     }
 
     # Samsung Specific Notes
@@ -3405,44 +4684,35 @@ while ($runLoop) {
     # Silicon Motion / Patriot controller-specific notes
     if ($brand -in @('SiliconMotionOEM', 'PatriotBurst')) {
         $wearA9 = $attributes | Where-Object { $_.ID -eq 0xA9 }
-        $hostWritesF1 = $attributes | Where-Object { $_.ID -eq 0xF1 }
-        $nandWritesF5 = $attributes | Where-Object { $_.ID -eq 0xF5 }
-
         $profileLabel = if ($brand -eq 'SiliconMotionOEM') { 'Silicon Motion OEM' } else { 'Patriot Burst' }
         Write-Host "`n  🔵 Ειδική Παρατήρηση $profileLabel profile:" -ForegroundColor $Cyan
         if ($wearA9) {
             Write-Host "  🔸 Η υπολειπόμενη ζωή (Remain Life) είναι " -NoNewline -ForegroundColor $White
             Write-Host "$($wearA9.Raw)%" -ForegroundColor $Yellow
         }
-        if ($brand -eq 'SiliconMotionOEM' -and $hostWritesF1 -and $nandWritesF5) {
-            $hostGB = [Math]::Round(($hostWritesF1.Raw * 32) / 1024, 2)
-            $nandGB = [Math]::Round(($nandWritesF5.Raw * 32) / 1024, 2)
-            $waf = if ($hostGB -gt 0) { [Math]::Round($nandGB / $hostGB, 2) } else { 0 }
-
-            Write-Host "  🔸 Host Writes: " -NoNewline -ForegroundColor $White
-            Write-Host "$hostGB GB" -ForegroundColor $Gray
-            Write-Host "  🔸 NAND Writes: " -NoNewline -ForegroundColor $White
-            Write-Host "$nandGB GB" -ForegroundColor $Gray
-            Write-Host "  🔸 Write Amplification Factor (WAF): " -NoNewline -ForegroundColor $White
-            Write-Host "$waf`x" -ForegroundColor $(if ($waf -gt 3) { "Yellow" } else { "Gray" })
-            if ($waf -gt 3) {
-                Write-Host "     (Υψηλό WAF: Ο controller γράφει πολύ περισσότερα δεδομένα στη NAND λόγω garbage collection.)" -ForegroundColor $Yellow
-            }
-        }
     }
 
     if ($brand -eq 'Phison') {
         $lifeE7 = $attributes | Where-Object { $_.ID -eq 0xE7 } | Select-Object -First 1
-        $writesF1 = $attributes | Where-Object { $_.ID -eq 0xF1 } | Select-Object -First 1
-
         Write-Host "`n  🔵 Ειδική Παρατήρηση Phison profile:" -ForegroundColor $Cyan
         if ($lifeE7) {
             Write-Host "  🔸 Η υπολειπόμενη ζωή (SSD Life Left) είναι " -NoNewline -ForegroundColor $White
             Write-Host "$($lifeE7.Raw)%" -ForegroundColor $Yellow
         }
-        if ($writesF1) {
-            Write-Host "  🔸 Lifetime Writes: " -NoNewline -ForegroundColor $White
-            Write-Host "$($writesF1.Raw) GiB" -ForegroundColor $Gray
+    }
+
+    if ($brand -eq 'KingstonUV400') {
+        $lifeE7 = $attributes | Where-Object { $_.ID -eq 0xE7 } | Select-Object -First 1
+        $undocumentedB7 = $attributes | Where-Object { $_.ID -eq 0xB7 } | Select-Object -First 1
+
+        Write-Host "`n  🔵 Ειδική Παρατήρηση Kingston UV400 profile:" -ForegroundColor $Cyan
+        if ($lifeE7) {
+            Write-Host "  🔸 Η επίσημη normalized υπολειπόμενη ζωή (0xE7 Current) είναι " -NoNewline -ForegroundColor $White
+            Write-Host "$($lifeE7.Current)%" -ForegroundColor $(if ($lifeE7.Current -le 60) { $Yellow } else { $Green })
+            Write-Host "  🔸 Το raw 0xE7 = $($lifeE7.Raw) διατηρείται ως ξεχωριστή vendor telemetry και δεν χρησιμοποιείται ως remaining-life percentage." -ForegroundColor $Gray
+        }
+        if ($undocumentedB7) {
+            Write-Host "  🔸 Το 0xB7 raw = $($undocumentedB7.Raw) δεν περιλαμβάνεται στην επίσημη Kingston UV400 SMART specification· παραμένει ορατό χωρίς failure συμπέρασμα." -ForegroundColor $Gray
         }
     }
 
@@ -3515,12 +4785,25 @@ while ($runLoop) {
     }
     } 6>&1
     )
+    Complete-DiskHealthPerformanceStage -Token $evaluationToken -Status success -ResultCount $selectedDrives.Count
 
     if ($menuEnabled -and $runLoop) {
+        $constructionToken = Start-DiskHealthPerformanceStage -Stage 'Report.Construction' -ParentStage 'Report'
         $reportRows = @(ConvertTo-DiskHealthReportRows -Records $reportRecords)
+        Complete-DiskHealthPerformanceStage -Token $constructionToken -Status success -ResultCount $reportRows.Count
         Show-DiskHealthReport -Rows $reportRows -Target $ComputerName
     }
     else {
-        Write-DiskHealthCapturedOutput -Records $reportRecords
+        $constructionToken = Start-DiskHealthPerformanceStage -Stage 'Report.Construction' -ParentStage 'Report'
+        $renderRecords = @($reportRecords)
+        Complete-DiskHealthPerformanceStage -Token $constructionToken -Status success -ResultCount $renderRecords.Count
+        $firstFrameToken = Start-DiskHealthPerformanceStage -Stage 'Report.FirstRenderedFrame' -ParentStage 'Report'
+        Write-DiskHealthCapturedOutput -Records $renderRecords
+        Complete-DiskHealthPerformanceStage -Token $firstFrameToken -Status success -ResultCount $renderRecords.Count
+        Save-DiskHealthPerformanceReport
     }
+}
+
+if ($null -ne $script:DiskHealthPerformanceContext -and -not $EmbeddedRemote -and -not $script:IsHomeLauncher) {
+    Save-DiskHealthPerformanceReport -Finalize -ShowSummary
 }
