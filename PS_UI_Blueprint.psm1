@@ -353,6 +353,48 @@ function Add-UiFrameShortcutSegments {
     Add-UiFrameLine -Frame $Frame -Text "$($line.ToString())$($_C.EraseLn)"
 }
 
+function Split-UiWrappedText {
+    param(
+        [AllowEmptyString()][string]$Text = '',
+        [int]$Width
+    )
+
+    $Width = [Math]::Max(1, $Width)
+    if ([string]::IsNullOrEmpty($Text)) { return @('') }
+    if ($Text.Length -le $Width) { return @($Text) }
+
+    $leading = [regex]::Match($Text, '^\s*').Value
+    if ($leading.Length -ge $Width) { $leading = '' }
+    $words = @($Text.Trim() -split '\s+')
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $line = $leading
+
+    foreach ($originalWord in $words) {
+        $word = $originalWord
+        $contentWidth = [Math]::Max(1, $Width - $leading.Length)
+        while ($word.Length -gt $contentWidth) {
+            if ($line.Length -gt $leading.Length) {
+                $lines.Add($line)
+                $line = $leading
+            }
+            $lines.Add($leading + $word.Substring(0, $contentWidth))
+            $word = $word.Substring($contentWidth)
+        }
+
+        $separator = if ($line.Length -gt $leading.Length) { ' ' } else { '' }
+        if (($line.Length + $separator.Length + $word.Length) -gt $Width) {
+            $lines.Add($line)
+            $line = $leading + $word
+        }
+        else {
+            $line += $separator + $word
+        }
+    }
+
+    if ($line.Length -gt 0) { $lines.Add($line) }
+    return @($lines)
+}
+
 function Get-UiAdaptiveColumnWidths {
     <#
     .SYNOPSIS
