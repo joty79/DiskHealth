@@ -353,6 +353,20 @@ function Add-UiFrameShortcutSegments {
     Add-UiFrameLine -Frame $Frame -Text "$($line.ToString())$($_C.EraseLn)"
 }
 
+function ConvertTo-UiSafeSingleLineText {
+    param([AllowEmptyString()][string]$Text = '')
+
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+
+    $safeText = $Text.Replace("`t", '    ').Replace("`r", ' ').Replace("`n", ' ')
+    # External diagnostics can contain zero-column bidi/format marks (for example
+    # EventLog 6008 U+200E characters). String.Length counts them, terminals do not,
+    # which moves the right border left. Other C0/C1 controls are unsafe in a frame.
+    $safeText = [regex]::Replace($safeText, '\p{Cf}', '')
+    $safeText = [regex]::Replace($safeText, '\p{Cc}', '')
+    return $safeText
+}
+
 function Split-UiWrappedText {
     param(
         [AllowEmptyString()][string]$Text = '',
