@@ -12,7 +12,7 @@
       2) Stateless immediate-mode redraw on every frame
       3) Single-write frame buffers with StringBuilder + [Console]::Write()
       4) Cursor-home redraw for normal frames, gated full clear only when needed
-      5) Responsive resize polling via KeyAvailable + Test-WindowResized
+      5) Settled pre-render resize detection plus responsive KeyAvailable polling
       6) Low-latency key polling around 10ms when render time is under 10ms
       7) BufferSize = WindowSize, including width and height, to reduce scrollback tearing
       8) Fullscreen dashboards use the alternate screen buffer by default
@@ -75,6 +75,7 @@ $_C = @{
 $script:LastWindowWidth = 0
 $script:LastWindowHeight = 0
 $script:RequestForceClear = $true
+$script:TuiViewportResizePending = $false
 $script:TuiBenchmarkLog = [System.Collections.Generic.List[string]]::new()
 $script:TuiAlternateScreenActive = $false
 
@@ -198,20 +199,126 @@ function Restore-TuiHost {
     }
 }
 
+function Enter-TuiModalAlternateScreen {
+    # A primary-buffer dashboard may still need a fullscreen modal that is
+    # immune to Windows Terminal scrollback reflow during maximize/restore.
+    # Return whether this call entered the alternate screen so the matching
+    # exit can preserve an already-active alternate-screen owner.
+    if ($script:TuiAlternateScreenActive) {
+        $script:RequestForceClear = $true
+        return $false
+    }
+
+    try {
+        [Console]::Write("$_E[?1049h$_E[?7l$_E[?25l$(Get-TuiForceClearSequence)")
+        $script:TuiAlternateScreenActive = $true
+        $script:LastWindowWidth = 0
+        $script:LastWindowHeight = 0
+        $script:TuiViewportResizePending = $true
+        $script:RequestForceClear = $true
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Exit-TuiModalAlternateScreen {
+    param([bool]$Entered)
+
+    if (-not $Entered) {
+        return
+    }
+
+    try {
+        [Console]::Write("$_E[?1049l$_E[?7l$_E[?25l")
+    }
+    finally {
+        $script:TuiAlternateScreenActive = $false
+        $script:LastWindowWidth = 0
+        $script:LastWindowHeight = 0
+        $script:TuiViewportResizePending = $true
+        $script:RequestForceClear = $true
+    }
+}
+
 function Get-UiWidth {
     try { [Math]::Max(1, $Host.UI.RawUI.WindowSize.Width - 2) }
     catch { 80 }
 }
 
-function Lock-ViewportToWindow {
+function Wait-TuiViewportStable {
+    param(
+        [int]$QuietMilliseconds = 90,
+        [int]$MaximumWaitMilliseconds = 600,
+        [int]$PollMilliseconds = 10
+    )
+
+    $QuietMilliseconds = [Math]::Max(20, $QuietMilliseconds)
+    $MaximumWaitMilliseconds = [Math]::Max($QuietMilliseconds, $MaximumWaitMilliseconds)
+    $PollMilliseconds = [Math]::Max(5, $PollMilliseconds)
+
     try {
-        $windowSize = $Host.UI.RawUI.WindowSize
-        $bufferSize = $Host.UI.RawUI.BufferSize
-        if ($bufferSize.Width -ne $windowSize.Width -or $bufferSize.Height -ne $windowSize.Height) {
-            $Host.UI.RawUI.BufferSize = $windowSize
-        }
+        $lastWidth = $Host.UI.RawUI.WindowSize.Width
+        $lastHeight = $Host.UI.RawUI.WindowSize.Height
     }
     catch {
+        return
+    }
+
+    $totalWait = [System.Diagnostics.Stopwatch]::StartNew()
+    $quietWait = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($totalWait.ElapsedMilliseconds -lt $MaximumWaitMilliseconds) {
+        Start-Sleep -Milliseconds $PollMilliseconds
+        try {
+            $width = $Host.UI.RawUI.WindowSize.Width
+            $height = $Host.UI.RawUI.WindowSize.Height
+        }
+        catch {
+            break
+        }
+
+        if ($width -ne $lastWidth -or $height -ne $lastHeight) {
+            $lastWidth = $width
+            $lastHeight = $height
+            $quietWait.Restart()
+            continue
+        }
+
+        if ($quietWait.ElapsedMilliseconds -ge $QuietMilliseconds) {
+            break
+        }
+    }
+
+    $script:LastWindowWidth = $lastWidth
+    $script:LastWindowHeight = $lastHeight
+    $script:RequestForceClear = $true
+}
+
+function Lock-ViewportToWindow {
+    # Windows Terminal can publish several intermediate row/column sizes while
+    # maximizing or restoring. Settle those transitions before frame geometry
+    # is built, then lock the primary buffer to the final viewport dimensions.
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $null = Test-WindowResized
+        if ($script:TuiViewportResizePending) {
+            Wait-TuiViewportStable
+            $script:TuiViewportResizePending = $false
+        }
+
+        try {
+            $windowSize = $Host.UI.RawUI.WindowSize
+            $bufferSize = $Host.UI.RawUI.BufferSize
+            if ($bufferSize.Width -ne $windowSize.Width -or $bufferSize.Height -ne $windowSize.Height) {
+                $Host.UI.RawUI.BufferSize = $windowSize
+            }
+        }
+        catch {
+        }
+
+        if (-not (Test-WindowResized)) {
+            break
+        }
     }
 }
 
@@ -228,6 +335,7 @@ function Test-WindowResized {
         $script:LastWindowWidth = $width
         $script:LastWindowHeight = $height
         $script:RequestForceClear = $true
+        $script:TuiViewportResizePending = $true
         return $true
     }
 
@@ -272,6 +380,10 @@ function Add-UiFrameLine {
         [Parameter(Mandatory)][System.Text.StringBuilder]$Frame,
         [AllowEmptyString()][string]$Text = ''
     )
+
+    if ([string]::IsNullOrEmpty($Text)) {
+        $Text = $_C.EraseLn
+    }
 
     $null = $Frame.Append($Text)
     $null = $Frame.Append([Environment]::NewLine)
