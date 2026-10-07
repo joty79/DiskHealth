@@ -51,6 +51,19 @@ function Test-DeviceCheckLanDiscoveryIPv4 {
     return $true
 }
 
+function Test-DeviceCheckMacAddressConflict {
+    param(
+        [AllowEmptyString()][string]$ExpectedMac = '',
+        [AllowEmptyString()][string]$ObservedMac = ''
+    )
+
+    $expected = $ExpectedMac.Replace(':', '-').ToUpperInvariant()
+    $observed = $ObservedMac.Replace(':', '-').ToUpperInvariant()
+    $unknownValues = @('', 'UNKNOWN', '00-00-00-00-00-00')
+    if ($expected -in $unknownValues -or $observed -in $unknownValues) { return $false }
+    return $expected -ne $observed
+}
+
 function ConvertTo-DeviceCheckHostDisplayName {
     param(
         [AllowEmptyString()][string]$HostName,
@@ -657,6 +670,10 @@ function Get-DeviceCheckDiscoveredHosts {
     $swPhase.Restart()
     $historyIPs = @()
     $historyIpToName = @{}
+    $historyIpToOriginalName = @{}
+    $historyIpToMac = @{}
+    $historyNameToMac = @{}
+    $currentNameEvidenceIPsSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $history = Get-DeviceCheckConnectionHistory
     $currentNetwork = Get-CurrentNetworkIdentity
     $currentNetworkId = $currentNetwork.NetworkId
@@ -673,6 +690,14 @@ function Get-DeviceCheckDiscoveredHosts {
             if ($entry.NetworkId -eq $currentNetworkId -and $entry.LastIPAddress -match '^\d+\.\d+\.\d+\.\d+$') {
                 $ipList.Add($entry.LastIPAddress)
                 $historyIpToName[$entry.LastIPAddress] = $entry.ComputerName
+                $historyIpToOriginalName[$entry.LastIPAddress] = $entry.ComputerName
+                if (-not [string]::IsNullOrWhiteSpace([string]$entry.MACAddress) -and [string]$entry.MACAddress -ne 'Unknown') {
+                    $historyIpToMac[$entry.LastIPAddress] = [string]$entry.MACAddress
+                }
+            }
+            if ($entry.NetworkId -eq $currentNetworkId -and -not [string]::IsNullOrWhiteSpace([string]$entry.ComputerName) -and
+                -not [string]::IsNullOrWhiteSpace([string]$entry.MACAddress) -and [string]$entry.MACAddress -ne 'Unknown') {
+                $historyNameToMac[[string]$entry.ComputerName] = [string]$entry.MACAddress
             }
         }
 
@@ -776,8 +801,13 @@ function Get-DeviceCheckDiscoveredHosts {
                             foreach ($ip in $res.IPs) {
                                 $ipList.Add($ip)
                                 $historyIpToName[$ip] = $res.ComputerName
+                                $historyIpToOriginalName[$ip] = $res.ComputerName
+                                if ($historyNameToMac.ContainsKey([string]$res.ComputerName)) {
+                                    $historyIpToMac[$ip] = $historyNameToMac[[string]$res.ComputerName]
+                                }
                                 if ($explorerHostNameSet.Contains($res.ComputerName)) {
                                     $null = $explorerNetworkIPsSet.Add($ip)
+                                    $null = $currentNameEvidenceIPsSet.Add($ip)
                                 }
                             }
                         }
@@ -809,6 +839,22 @@ function Get-DeviceCheckDiscoveredHosts {
                 $_.LinkLayerAddress -ne '00-00-00-00-00-00' -and
                 (Test-DeviceCheckLanDiscoveryIPv4 -Address $_.IPAddress -SubnetPrefixes $localSubnetPrefixes)
             }
+    }
+
+    # Historical IP-to-name hints are useful only while the address still belongs
+    # to the same device. Drop the hint and any IP-scoped name cache entry later
+    # when current neighbor evidence proves that DHCP reassigned the address.
+    $staleHistoryNameIPsSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($neighbor in @($neighbors)) {
+        $neighborIp = [string]$neighbor.IPAddress
+        if (-not $historyIpToMac.ContainsKey($neighborIp) -or $currentNameEvidenceIPsSet.Contains($neighborIp)) { continue }
+        if (-not (Test-DeviceCheckMacAddressConflict -ExpectedMac $historyIpToMac[$neighborIp] -ObservedMac ([string]$neighbor.LinkLayerAddress))) { continue }
+
+        $null = $staleHistoryNameIPsSet.Add($neighborIp)
+        if ($historyIpToName.ContainsKey($neighborIp) -and $historyIpToOriginalName.ContainsKey($neighborIp) -and
+            [string]$historyIpToName[$neighborIp] -eq [string]$historyIpToOriginalName[$neighborIp]) {
+            $null = $historyIpToName.Remove($neighborIp)
+        }
     }
 
     # Filter out gateway IPs to avoid connecting to router
@@ -855,6 +901,7 @@ function Get-DeviceCheckDiscoveredHosts {
             $null = $targetIPsSet.Add($hostEntry.IP)
             if (-not [string]::IsNullOrWhiteSpace($hostEntry.HostName) -and $hostEntry.HostName -ne $hostEntry.IP) {
                 $historyIpToName[$hostEntry.IP] = $hostEntry.HostName
+                $null = $currentNameEvidenceIPsSet.Add($hostEntry.IP)
             }
         }
     }
@@ -967,6 +1014,12 @@ function Get-DeviceCheckDiscoveredHosts {
     $resolvedNames = @{}
     $hostsCache = Get-DeviceCheckHostsCache -NetworkId $currentNetworkId
     $cacheUpdatedFromDiscovery = $false
+    foreach ($staleIp in $staleHistoryNameIPsSet) {
+        if ($hostsCache.ContainsKey($staleIp)) {
+            $null = $hostsCache.Remove($staleIp)
+            $cacheUpdatedFromDiscovery = $true
+        }
+    }
     foreach ($entry in $historyIpToName.GetEnumerator()) {
         $displayName = ConvertTo-DeviceCheckHostDisplayName -HostName $entry.Value -FallbackIP $entry.Key
         if ($displayName -ne $entry.Key -and ((-not $hostsCache.ContainsKey($entry.Key)) -or $hostsCache[$entry.Key] -ne $displayName)) {
@@ -1775,12 +1828,39 @@ function Get-WinRMTargetCatalog {
         $ip = [string]$entry.IPAddress
         $mac = [string]$entry.MACAddress
         $matchIndex = -1
-        if (-not [string]::IsNullOrWhiteSpace($mac) -and $mac -ne 'Unknown' -and $byMac.ContainsKey($mac.Replace(':', '-').ToUpperInvariant())) {
-            $matchIndex = [int]$byMac[$mac.Replace(':', '-').ToUpperInvariant()]
-        } elseif (-not [string]::IsNullOrWhiteSpace($ip) -and $byIp.ContainsKey($ip)) {
-            $matchIndex = [int]$byIp[$ip]
-        } elseif (-not [string]::IsNullOrWhiteSpace($name) -and $byName.ContainsKey($name.ToLowerInvariant())) {
-            $matchIndex = [int]$byName[$name.ToLowerInvariant()]
+        $snapshotNameConflictsWithSavedIdentity = $false
+        $normalizedMac = $(if ([string]::IsNullOrWhiteSpace($mac) -or $mac -eq 'Unknown') { '' } else { $mac.Replace(':', '-').ToUpperInvariant() })
+
+        # A DHCP address can be reused by a different PC. Prefer stable identity
+        # evidence and never merge an IP-only candidate across a known MAC or
+        # hostname conflict.
+        if (-not [string]::IsNullOrWhiteSpace($normalizedMac) -and $byMac.ContainsKey($normalizedMac)) {
+            $matchIndex = [int]$byMac[$normalizedMac]
+        }
+
+        if ($matchIndex -lt 0 -and -not [string]::IsNullOrWhiteSpace($name) -and $byName.ContainsKey($name.ToLowerInvariant())) {
+            $candidateIndex = [int]$byName[$name.ToLowerInvariant()]
+            $candidate = $targets[$candidateIndex]
+            $candidateMac = $(if ([string]::IsNullOrWhiteSpace([string]$candidate.MACAddress) -or [string]$candidate.MACAddress -eq 'Unknown') { '' } else { ([string]$candidate.MACAddress).Replace(':', '-').ToUpperInvariant() })
+            if (-not (Test-DeviceCheckMacAddressConflict -ExpectedMac $candidateMac -ObservedMac $normalizedMac)) {
+                $matchIndex = $candidateIndex
+            } else {
+                $snapshotNameConflictsWithSavedIdentity = $true
+            }
+        }
+
+        if ($matchIndex -lt 0 -and -not [string]::IsNullOrWhiteSpace($ip) -and $byIp.ContainsKey($ip)) {
+            $candidateIndex = [int]$byIp[$ip]
+            $candidate = $targets[$candidateIndex]
+            $candidateMac = $(if ([string]::IsNullOrWhiteSpace([string]$candidate.MACAddress) -or [string]$candidate.MACAddress -eq 'Unknown') { '' } else { ([string]$candidate.MACAddress).Replace(':', '-').ToUpperInvariant() })
+            $macConflict = Test-DeviceCheckMacAddressConflict -ExpectedMac $candidateMac -ObservedMac $normalizedMac
+            $candidateName = [string]$candidate.ComputerName
+            $knownSnapshotName = -not [string]::IsNullOrWhiteSpace($name) -and -not (Test-DeviceCheckIPv4Address -Address $name)
+            $knownCandidateName = -not [string]::IsNullOrWhiteSpace($candidateName) -and -not (Test-DeviceCheckIPv4Address -Address $candidateName)
+            $nameConflict = $knownSnapshotName -and $knownCandidateName -and $name -ne $candidateName
+            if (-not $macConflict -and -not $nameConflict) {
+                $matchIndex = $candidateIndex
+            }
         }
 
         if ($matchIndex -ge 0) {
@@ -1797,9 +1877,10 @@ function Get-WinRMTargetCatalog {
             continue
         }
 
+        $snapshotDisplayName = $(if ($snapshotNameConflictsWithSavedIdentity -and (Test-DeviceCheckIPv4Address -Address $ip)) { $ip } else { $name })
         $targets.Add([PSCustomObject]@{
             PSTypeName          = 'WinRMDiscovery.TargetCatalogEntry'
-            ComputerName        = $name
+            ComputerName        = $snapshotDisplayName
             IPAddress           = $ip
             MACAddress          = $mac
             UserName            = 'Unknown'

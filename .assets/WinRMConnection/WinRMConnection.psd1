@@ -1,6 +1,6 @@
 @{
     RootModule        = 'WinRMConnection.psm1'
-    ModuleVersion     = '1.1.0'
+    ModuleVersion     = '1.2.0'
     GUID              = 'faffc83f-52b9-4ada-bd7b-00f29fc51cd9'
     Author            = 'joty79'
     CompanyName       = 'Personal'
@@ -11,6 +11,7 @@
         'Connect-WinRMSession'
         'Get-WinRMCredentialProfile'
         'Get-WinRMConnectionErrorCategory'
+        'Get-WinRMRemoteCapability'
         'Invoke-WinRMCommand'
         'New-WinRMBlankPasswordCredential'
         'Remove-WinRMCredentialProfile'

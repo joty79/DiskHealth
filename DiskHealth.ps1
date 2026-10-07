@@ -4634,6 +4634,23 @@ while ($runLoop) {
         Write-Host "  🚨 ALL CAPS: ΑΝΤΙΚΑΤΑΣΤΗΣΤΕ ΤΟΝ ΔΙΣΚΟ ΑΜΕΣΑ ΓΙΑ ΑΠΟΦΥΓΗ ΑΠΩΛΕΙΑΣ ΔΕΔΟΜΕΝΩΝ." -ForegroundColor $Red
     }
 
+    if ($brand -ne 'NVMe') {
+        $commandTimeout = $attributes | Where-Object { $_.ID -eq 0xBC } | Select-Object -First 1
+        if ($commandTimeout -and $commandTimeout.Raw -gt 0) {
+            $reportTextWidth = Get-ConsoleSafeTextWidth
+            Write-WrappedConsoleText -Text "0xBC Command Timeout: raw $($commandTimeout.Raw). Το κίτρινο επισημαίνει μη μηδενικό ιστορικό counter· δεν αποδεικνύει από μόνο του τρέχουσα βλάβη. Ένα snapshot δεν δείχνει πότε συνέβησαν τα συμβάντα ή αν συνεχίζονται τώρα." -FirstPrefix "  ⚠️ " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Yellow
+            $timeoutThresholdText = if ($commandTimeout.Threshold -eq 0) {
+                'Fail <= = 0: δεν ορίζεται ενεργό firmware failure threshold για αυτό το attribute.'
+            } elseif ($commandTimeout.Current -le $commandTimeout.Threshold) {
+                "Έχει ενεργοποιηθεί το firmware failure threshold (Current <= $($commandTimeout.Threshold))· ισχύει η παραπάνω κρίσιμη αξιολόγηση."
+            } else {
+                "Το Current είναι πάνω από το firmware failure threshold $($commandTimeout.Threshold)."
+            }
+            Write-WrappedConsoleText -Text "Current/Worst = $($commandTimeout.Current)/$($commandTimeout.Worst). $timeoutThresholdText" -FirstPrefix "  🔸 " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
+            Write-WrappedConsoleText -Text 'Κρατήστε backup και συγκρίνετε το raw 0xBC με νέα μέτρηση. Αν αυξάνεται ή εμφανίζονται freezes, αποσυνδέσεις ή I/O errors, ελέγξτε σύνδεση, τροφοδοσία και controller και εκτελέστε SMART self-test. Η τιμή μόνη της δεν αρκεί για απόφαση αντικατάστασης.' -FirstPrefix "  💡 " -ContinuationPrefix "     " -MaximumWidth $reportTextWidth -ForegroundColor $Gray
+        }
+    }
+
     if ($brand -ne 'NVMe' -and -not $isRotationalMedia) {
         $dataTotals = Get-AtaDataTransferEstimate -Profile $brand -Attributes $attributes -SmartData $smart
         if ($dataTotals.IsSupported) {
