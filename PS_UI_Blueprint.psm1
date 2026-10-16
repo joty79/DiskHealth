@@ -381,6 +381,10 @@ function Add-UiFrameLine {
         [AllowEmptyString()][string]$Text = ''
     )
 
+    if ([string]::IsNullOrEmpty($Text)) {
+        $Text = $_C.EraseLn
+    }
+
     $null = $Frame.Append($Text)
     $null = $Frame.Append([Environment]::NewLine)
 }
