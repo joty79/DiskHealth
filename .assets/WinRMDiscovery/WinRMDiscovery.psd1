@@ -1,11 +1,11 @@
 @{
     RootModule        = 'WinRMDiscovery.psm1'
-    ModuleVersion     = '1.4.0'
+    ModuleVersion     = '1.5.0'
     GUID              = '822b5f8e-c91c-4f87-9855-bec01e9a0f76'
     Author            = 'joty79'
     CompanyName       = 'Personal'
     Copyright         = '(c) 2026 joty79. All rights reserved.'
-    Description       = 'Reusable, PC-only LAN discovery for WinRM PowerShell tools.'
+    Description       = 'Reusable, PC-only LAN and Tailscale discovery for WinRM PowerShell tools.'
     PowerShellVersion = '5.1'
     FunctionsToExport = @(
         'Find-WinRMComputer'

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.25.0] - 2026-11-07
+
+### Added
+- Synced canonical `WinRMDiscovery` 1.5.0. When Tailscale is installed and logged in, **Scan network for more PCs** also lists online tailnet peers (100.64.0.0/10) whose WinRM 5985 or SMB 445 answers, or that Tailscale reports as Windows, tagged `(Tailscale)`. Only peers listed by the local Tailscale client are probed; the range is never swept. A missing or logged-out client adds no rows and no delay.
+- **Enter IP or hostname** in the network target list: type one IPv4 address or hostname (for example a Tailscale address or MagicDNS name). The entry goes through the same exact-target `TrustedHosts` preparation, WinRM login and saved-credential flow as a listed PC, with no second trust prompt. Lists, wildcards and spaces are rejected; an empty line returns to the list. Also available after `-Discover`.
+- Structured performance logs record the Tailscale phase as `Discovery.Tailscale`.
 ## [1.24.7] - 2026-08-03
 
 ### Changed
