@@ -5,6 +5,7 @@ $script:WinRMDiscoveryModuleRoot = $PSScriptRoot
 $script:WinRMDiscoveryBenchmarkMode = $false
 $script:WinRMDiscoveryDiagnosticsInMemoryOnly = $false
 $script:WinRMDiscoveryLastScanResult = $null
+$script:WinRMDiscoveryTailscaleStatusOverride = $null
 
 $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
 if ([string]::IsNullOrWhiteSpace($localAppData)) {
@@ -474,6 +475,246 @@ function Invoke-DeviceCheckComputerPortSweep {
     return @($results.Values)
 }
 
+# Tailscale peers live in the 100.64.0.0/10 shared address space. The module
+# never sweeps that range; it only probes the online peers that the local
+# Tailscale client already lists.
+function Test-DeviceCheckTailscaleIPv4 {
+    param([AllowEmptyString()][string]$Address)
+
+    if (-not (Test-DeviceCheckIPv4Address -Address $Address)) { return $false }
+    $octets = $Address.Split('.')
+    if ($octets.Count -ne 4) { return $false }
+    return ([int]$octets[0] -eq 100) -and ([int]$octets[1] -ge 64) -and ([int]$octets[1] -le 127)
+}
+
+function Get-DeviceCheckTailscaleExecutablePath {
+    $command = Get-Command -Name 'tailscale.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $command -and -not [string]::IsNullOrWhiteSpace([string]$command.Source)) {
+        return [string]$command.Source
+    }
+    $candidates = @(
+        $(if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) { Join-Path -Path $env:ProgramFiles -ChildPath 'Tailscale\tailscale.exe' })
+        'C:\Program Files\Tailscale\tailscale.exe'
+    )
+    foreach ($candidate in $candidates) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            return $candidate
+        }
+    }
+    return ''
+}
+
+function Start-DeviceCheckTailscaleStatus {
+    # Returns a pending status handle, or $null when Tailscale is not installed.
+    if ($null -ne $script:WinRMDiscoveryTailscaleStatusOverride) {
+        return [PSCustomObject]@{ Override = $script:WinRMDiscoveryTailscaleStatusOverride; Process = $null; StdoutTask = $null; StderrTask = $null; Watch = [System.Diagnostics.Stopwatch]::StartNew() }
+    }
+
+    $executable = Get-DeviceCheckTailscaleExecutablePath
+    if ([string]::IsNullOrWhiteSpace($executable)) { return $null }
+
+    $process = $null
+    try {
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $executable
+        $startInfo.Arguments = 'status --json'
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $null = $process.Start()
+        return [PSCustomObject]@{
+            Override   = $null
+            Process    = $process
+            StdoutTask = $process.StandardOutput.ReadToEndAsync()
+            StderrTask = $process.StandardError.ReadToEndAsync()
+            Watch      = $watch
+        }
+    } catch {
+        if ($null -ne $process) { try { $process.Dispose() } catch {} }
+        return $null
+    }
+}
+
+function Receive-DeviceCheckTailscaleStatus {
+    # Returns the raw JSON text, or '' on timeout, non-zero exit, or failure.
+    param(
+        [AllowNull()]$Handle,
+        [int]$TimeoutMs = 1500
+    )
+
+    if ($null -eq $Handle) { return '' }
+    if ($null -ne $Handle.Override) {
+        try { return [string](& $Handle.Override) } catch { return '' }
+    }
+
+    $process = $Handle.Process
+    try {
+        $remaining = [Math]::Max(0, $TimeoutMs - [int]$Handle.Watch.ElapsedMilliseconds)
+        if (-not $process.WaitForExit($remaining)) {
+            try { $process.Kill() } catch {}
+            return ''
+        }
+        if (-not $Handle.StdoutTask.Wait(250)) { return '' }
+        if ($process.ExitCode -ne 0) { return '' }
+        return [string]$Handle.StdoutTask.Result
+    } catch {
+        return ''
+    } finally {
+        try { $process.Dispose() } catch {}
+    }
+}
+
+function ConvertFrom-DeviceCheckTailscaleStatusJson {
+    # Parses `tailscale status --json` into online peers with one IPv4 each.
+    param([AllowEmptyString()][string]$Json)
+
+    if ([string]::IsNullOrWhiteSpace($Json)) { return @() }
+    try {
+        $status = $Json | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return @()
+    }
+    if ([string](Get-WinRMDiscoveryObjectPropertyValue -InputObject $status -Name @('BackendState') -DefaultValue '') -ne 'Running') {
+        return @()
+    }
+
+    $selfIPs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $self = Get-WinRMDiscoveryObjectPropertyValue -InputObject $status -Name @('Self')
+    foreach ($selfIp in @(Get-WinRMDiscoveryObjectPropertyValue -InputObject $self -Name @('TailscaleIPs') -DefaultValue @())) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$selfIp)) { $null = $selfIPs.Add([string]$selfIp) }
+    }
+
+    $peerMap = Get-WinRMDiscoveryObjectPropertyValue -InputObject $status -Name @('Peer')
+    if ($null -eq $peerMap) { return @() }
+
+    $peers = [System.Collections.Generic.List[object]]::new()
+    $seenIPs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($property in @($peerMap.PSObject.Properties)) {
+        $peer = $property.Value
+        if ($null -eq $peer) { continue }
+        if (-not [bool](Get-WinRMDiscoveryObjectPropertyValue -InputObject $peer -Name @('Online') -DefaultValue $false)) { continue }
+
+        $ipAddress = ''
+        foreach ($candidate in @(Get-WinRMDiscoveryObjectPropertyValue -InputObject $peer -Name @('TailscaleIPs') -DefaultValue @())) {
+            if (Test-DeviceCheckTailscaleIPv4 -Address ([string]$candidate)) {
+                $ipAddress = [string]$candidate
+                break
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($ipAddress) -or $selfIPs.Contains($ipAddress) -or -not $seenIPs.Add($ipAddress)) { continue }
+
+        $dnsName = ([string](Get-WinRMDiscoveryObjectPropertyValue -InputObject $peer -Name @('DNSName') -DefaultValue '')).TrimEnd('.')
+        if ($dnsName -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$') { $dnsName = '' }
+        $hostName = ([string](Get-WinRMDiscoveryObjectPropertyValue -InputObject $peer -Name @('HostName') -DefaultValue '')).Trim()
+        if ($hostName -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$') { $hostName = '' }
+        if ([string]::IsNullOrWhiteSpace($hostName) -and -not [string]::IsNullOrWhiteSpace($dnsName)) {
+            $hostName = $dnsName.Split('.')[0]
+        }
+        if ([string]::IsNullOrWhiteSpace($hostName)) { $hostName = $ipAddress }
+
+        $peers.Add([PSCustomObject]@{
+            HostName  = $hostName
+            DnsName   = $dnsName
+            IPAddress = $ipAddress
+            OS        = ([string](Get-WinRMDiscoveryObjectPropertyValue -InputObject $peer -Name @('OS') -DefaultValue '')).ToLowerInvariant()
+        })
+    }
+    return @($peers)
+}
+
+function Start-DeviceCheckTailscalePeerProbe {
+    # Starts the same bounded TCP 5985/445 connection probes used by the LAN
+    # phase. Collect them with Receive-DeviceCheckTailscalePeerProbe.
+    param([AllowEmptyCollection()][object[]]$Peers = @())
+
+    $probes = [System.Collections.Generic.List[object]]::new()
+    foreach ($peer in @($Peers)) {
+        if ($null -eq $peer -or -not (Test-DeviceCheckTailscaleIPv4 -Address ([string]$peer.IPAddress))) { continue }
+        $tcp1 = [System.Net.Sockets.TcpClient]::new()
+        $tcp2 = [System.Net.Sockets.TcpClient]::new()
+        try {
+            $ipObj = [System.Net.IPAddress]::Parse([string]$peer.IPAddress)
+            $probes.Add([PSCustomObject]@{
+                Peer       = $peer
+                TcpClient1 = $tcp1
+                Task1      = $tcp1.ConnectAsync($ipObj, 5985)
+                TcpClient2 = $tcp2
+                Task2      = $tcp2.ConnectAsync($ipObj, 445)
+            })
+        } catch {
+            $tcp1.Dispose()
+            $tcp2.Dispose()
+        }
+    }
+    return [PSCustomObject]@{
+        Probes = @($probes)
+        Watch  = [System.Diagnostics.Stopwatch]::StartNew()
+    }
+}
+
+function ConvertTo-DeviceCheckTailscaleHostRow {
+    # Applies the PC-only evidence rule: an open WinRM/SMB port, or a peer
+    # that the Tailscale control plane reports as a Windows node.
+    param(
+        [Parameter(Mandatory)]$Peer,
+        [bool]$WinRmOpen,
+        [bool]$SmbOpen
+    )
+
+    $isWindowsPeer = [string]$Peer.OS -eq 'windows'
+    if (-not $WinRmOpen -and -not $SmbOpen -and -not $isWindowsPeer) { return $null }
+    return [PSCustomObject]@{
+        IP              = [string]$Peer.IPAddress
+        HostName        = ConvertTo-DeviceCheckHostDisplayName -HostName ([string]$Peer.HostName) -FallbackIP ([string]$Peer.IPAddress)
+        MAC             = 'Unknown'
+        WinRmOpen       = $WinRmOpen
+        SmbOpen         = $SmbOpen -and -not $WinRmOpen
+        DetectedOnly    = -not $WinRmOpen -and -not $SmbOpen
+        DiscoverySource = 'Tailscale'
+        DnsName         = [string]$Peer.DnsName
+    }
+}
+
+function Receive-DeviceCheckTailscalePeerProbe {
+    param(
+        [AllowNull()]$ProbeSet,
+        [int]$TimeoutMs = 1000
+    )
+
+    if ($null -eq $ProbeSet) { return @() }
+    $probes = @($ProbeSet.Probes)
+    while ($ProbeSet.Watch.ElapsedMilliseconds -lt $TimeoutMs) {
+        $allDone = $true
+        foreach ($probe in $probes) {
+            if (-not $probe.Task1.IsCompleted -or -not $probe.Task2.IsCompleted) {
+                $allDone = $false
+                break
+            }
+        }
+        if ($allDone) { break }
+        Start-Sleep -Milliseconds 20
+    }
+
+    $rows = [System.Collections.Generic.List[object]]::new()
+    foreach ($probe in $probes) {
+        try {
+            $winRmOpen = $probe.Task1.IsCompleted -and $probe.TcpClient1.Connected
+            $smbOpen = $probe.Task2.IsCompleted -and $probe.TcpClient2.Connected
+            $row = ConvertTo-DeviceCheckTailscaleHostRow -Peer $probe.Peer -WinRmOpen $winRmOpen -SmbOpen $smbOpen
+            if ($null -ne $row) { $rows.Add($row) }
+        } finally {
+            try { $probe.TcpClient1.Dispose() } catch {}
+            try { $probe.TcpClient2.Dispose() } catch {}
+        }
+    }
+    return @($rows)
+}
+
 function Get-DeviceCheckHostsCache {
     param([string]$NetworkId)
     $path = Join-Path -Path $script:WinRMDiscoveryStateRoot -ChildPath 'hosts-cache.json'
@@ -608,7 +849,7 @@ function Get-CurrentNetworkIdentity {
         }
         if ($null -eq $ipInfo) {
             $ipInfo = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                Where-Object { $_.InterfaceAlias -notmatch 'Loopback|vEthernet' } |
+                Where-Object { $_.InterfaceAlias -notmatch 'Loopback|vEthernet|Tailscale' } |
                 Select-Object -First 1
         }
         if ($ipInfo -and $ipInfo.IPAddress -match '^(\d+\.\d+\.\d+)\.\d+$') {
@@ -631,11 +872,12 @@ function Get-DeviceCheckDiscoveredHosts {
     $discovered = [System.Collections.Generic.List[object]]::new()
     $results = @()
 
-    # 1. Interfaces lookup
+    # 1. Interfaces lookup. The Tailscale tunnel is not a LAN: its peers come
+    # from the Tailscale source instead of a /24 sweep of the tailnet.
     $swPhase = [System.Diagnostics.Stopwatch]::StartNew()
     $interfaces = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         Where-Object {
-            $_.InterfaceAlias -notmatch "Loopback|vEthernet" -and
+            $_.InterfaceAlias -notmatch "Loopback|vEthernet|Tailscale" -and
             $_.AddressState -eq "Preferred" -and
             $_.IPAddress -notmatch "^169\.254\."
         }
@@ -1638,15 +1880,21 @@ function ConvertTo-WinRMDiscoverySnapshotTarget {
     if ([string]::IsNullOrWhiteSpace($status)) {
         $status = if ($winRMHttpOpen) { 'WinRMReady' } elseif ($smbOpen) { 'WinRMDisabled' } else { 'ComputerDetected' }
     }
+    $discoverySource = [string](Get-WinRMDiscoveryObjectPropertyValue -InputObject $Target -Name @('DiscoverySource') -DefaultValue 'LAN')
+    if ($discoverySource -notin @('LAN', 'Tailscale')) { $discoverySource = 'LAN' }
+    $dnsName = [string](Get-WinRMDiscoveryObjectPropertyValue -InputObject $Target -Name @('DnsName') -DefaultValue '')
+    if ($dnsName -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$') { $dnsName = '' }
 
     return [PSCustomObject]@{
-        ComputerName  = $computerName
-        IPAddress     = $ipAddress
-        MACAddress    = $macAddress
-        WinRMHttpOpen = $winRMHttpOpen
-        SMBOpen       = $smbOpen
-        DetectedOnly  = $detectedOnly
-        Status        = $status
+        ComputerName    = $computerName
+        IPAddress       = $ipAddress
+        MACAddress      = $macAddress
+        WinRMHttpOpen   = $winRMHttpOpen
+        SMBOpen         = $smbOpen
+        DetectedOnly    = $detectedOnly
+        Status          = $status
+        DiscoverySource = $discoverySource
+        DnsName         = $dnsName
     }
 }
 
@@ -1807,6 +2055,8 @@ function Get-WinRMTargetCatalog {
             NetworkId           = $NetworkId
             LastConnected       = [string](Get-WinRMDiscoveryObjectPropertyValue -InputObject $entry -Name @('LastConnected') -DefaultValue '')
             Source              = 'SavedHistory'
+            DiscoverySource     = $(if (Test-DeviceCheckTailscaleIPv4 -Address $ip) { 'Tailscale' } else { 'LAN' })
+            DnsName             = ''
             HasSavedHistory     = $true
             HasDiscoverySnapshot = $false
             RequiresValidation  = $true
@@ -1838,7 +2088,14 @@ function Get-WinRMTargetCatalog {
             $matchIndex = [int]$byMac[$normalizedMac]
         }
 
-        if ($matchIndex -lt 0 -and -not [string]::IsNullOrWhiteSpace($name) -and $byName.ContainsKey($name.ToLowerInvariant())) {
+        # A Tailscale address and a LAN address are distinct routes to a PC
+        # that may share its hostname; merge across them only by exact IP.
+        $entrySource = [string](Get-WinRMDiscoveryObjectPropertyValue -InputObject $entry -Name @('DiscoverySource') -DefaultValue 'LAN')
+        $nameCandidateSourceMatches = $false
+        if (-not [string]::IsNullOrWhiteSpace($name) -and $byName.ContainsKey($name.ToLowerInvariant())) {
+            $nameCandidateSourceMatches = [string]$targets[[int]$byName[$name.ToLowerInvariant()]].DiscoverySource -eq $entrySource
+        }
+        if ($matchIndex -lt 0 -and $nameCandidateSourceMatches) {
             $candidateIndex = [int]$byName[$name.ToLowerInvariant()]
             $candidate = $targets[$candidateIndex]
             $candidateMac = $(if ([string]::IsNullOrWhiteSpace([string]$candidate.MACAddress) -or [string]$candidate.MACAddress -eq 'Unknown') { '' } else { ([string]$candidate.MACAddress).Replace(':', '-').ToUpperInvariant() })
@@ -1869,6 +2126,8 @@ function Get-WinRMTargetCatalog {
             if ([string]::IsNullOrWhiteSpace($row.IPAddress)) { $row.IPAddress = $ip }
             if ($row.MACAddress -eq 'Unknown' -and $mac -ne 'Unknown') { $row.MACAddress = $mac }
             $row.Source = 'SavedHistory+DiscoverySnapshot'
+            $row.DiscoverySource = $entrySource
+            if ([string]::IsNullOrWhiteSpace($row.DnsName)) { $row.DnsName = [string]$entry.DnsName }
             $row.HasDiscoverySnapshot = $true
             $row.CachedStatus = [string]$entry.Status
             $row.WinRMHttpOpen = [bool]$entry.WinRMHttpOpen
@@ -1887,6 +2146,8 @@ function Get-WinRMTargetCatalog {
             NetworkId           = $NetworkId
             LastConnected       = ''
             Source              = 'DiscoverySnapshot'
+            DiscoverySource     = $entrySource
+            DnsName             = [string]$entry.DnsName
             HasSavedHistory     = $false
             HasDiscoverySnapshot = $true
             RequiresValidation  = $true
@@ -2005,7 +2266,10 @@ function Find-WinRMComputer {
         [string]$StateRoot = '',
         [AllowEmptyString()][string]$NetworkId = '',
         [switch]$IncludeDiagnostics,
-        [switch]$DiagnosticsInMemoryOnly
+        [switch]$DiagnosticsInMemoryOnly,
+        [switch]$SkipTailscale,
+        [ValidateRange(100, 10000)][int]$TailscaleStatusTimeoutMilliseconds = 1500,
+        [ValidateRange(100, 10000)][int]$TailscaleProbeTimeoutMilliseconds = 1000
     )
 
     if (-not [string]::IsNullOrWhiteSpace($StateRoot)) {
@@ -2015,7 +2279,42 @@ function Find-WinRMComputer {
     $script:WinRMDiscoveryBenchmarkMode = [bool]$IncludeDiagnostics
     $script:WinRMDiscoveryDiagnosticsInMemoryOnly = [bool]$DiagnosticsInMemoryOnly
     $ProgressPreference = 'SilentlyContinue'
-    $raw = @(Get-DeviceCheckDiscoveredHosts)
+
+    # Optional Tailscale source: read the peer list first (normally tens of
+    # milliseconds), then let its TCP probes run while the LAN phases execute.
+    # A missing, stopped, or logged-out client yields no rows and no output.
+    $tailscaleWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $tailscalePeers = @()
+    $tailscaleProbeSet = $null
+    if (-not $SkipTailscale) {
+        $tailscaleStatus = Start-DeviceCheckTailscaleStatus
+        $tailscaleJson = Receive-DeviceCheckTailscaleStatus -Handle $tailscaleStatus -TimeoutMs $TailscaleStatusTimeoutMilliseconds
+        $tailscalePeers = @(ConvertFrom-DeviceCheckTailscaleStatusJson -Json $tailscaleJson)
+        if ($tailscalePeers.Count -gt 0) {
+            $tailscaleProbeSet = Start-DeviceCheckTailscalePeerProbe -Peers $tailscalePeers
+        }
+    }
+    $tailscaleStartMs = $tailscaleWatch.Elapsed.TotalMilliseconds
+
+    $raw = [System.Collections.Generic.List[object]]::new()
+    foreach ($item in @(Get-DeviceCheckDiscoveredHosts)) {
+        if ($null -ne $item) { $raw.Add($item) }
+    }
+
+    $tailscaleWatch.Restart()
+    $tailscaleRows = @(Receive-DeviceCheckTailscalePeerProbe -ProbeSet $tailscaleProbeSet -TimeoutMs $TailscaleProbeTimeoutMilliseconds)
+    $lanIPs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($item in $raw) { $null = $lanIPs.Add([string]$item.IP) }
+    foreach ($row in $tailscaleRows) {
+        if (-not $lanIPs.Contains([string]$row.IP)) { $raw.Add($row) }
+    }
+    if ($script:WinRMDiscoveryBenchmarkMode -and $null -ne $script:WinRMDiscoveryLastScanResult) {
+        $tailscaleMs = $tailscaleStartMs + $tailscaleWatch.Elapsed.TotalMilliseconds
+        $tailscaleLine = "  Phase 8 (Tailscale): $([Math]::Round($tailscaleMs, 1)) ms ($($tailscaleRows.Count) hosts)"
+        $scanLines = @($script:WinRMDiscoveryLastScanResult | Where-Object { -not [string]::IsNullOrEmpty([string]$_) })
+        $script:WinRMDiscoveryLastScanResult = @($scanLines + $tailscaleLine + '')
+    }
+
     $results = [System.Collections.Generic.List[object]]::new()
     foreach ($item in $raw) {
         $status = if ($item.WinRmOpen) {
@@ -2035,6 +2334,8 @@ function Find-WinRMComputer {
             SMBOpen         = [bool]$item.SmbOpen
             DetectedOnly    = [bool]$item.DetectedOnly
             Status          = $status
+            DiscoverySource = [string](Get-WinRMDiscoveryObjectPropertyValue -InputObject $item -Name @('DiscoverySource') -DefaultValue 'LAN')
+            DnsName         = [string](Get-WinRMDiscoveryObjectPropertyValue -InputObject $item -Name @('DnsName') -DefaultValue '')
             HostName        = $item.HostName
             IP              = $item.IP
             MAC             = $item.MAC

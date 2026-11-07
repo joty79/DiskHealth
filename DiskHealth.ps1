@@ -654,6 +654,7 @@ function Add-DiskHealthDiscoveryDiagnostics {
         'BgQueue'  = 'Discovery.NameResolution.BackgroundQueue'
         'Result'   = 'Discovery.NameResolution.ResultBuild'
         'MACMap'   = 'Discovery.NameResolution.MacMap'
+        'Tailscale' = 'Discovery.Tailscale'
     }
     foreach ($line in @($Diagnostics)) {
         if ($line -notmatch '^\s*Phase\s+\S+\s+\((?<Name>[^)]+)\)\s*:\s*(?<Ms>[0-9.,]+)\s*ms(?:\s*\((?<Count>\d+)\s+hosts\))?') { continue }
@@ -894,6 +895,7 @@ function Get-DiskHealthSavedWinRMTargets {
             ValidationStatus = $presentation.ValidationStatus
             HasDiscoverySnapshot = $presentation.HasDiscoverySnapshot
             Source        = $entry.Source
+            DiscoverySource = $(if ($entry.PSObject.Properties['DiscoverySource']) { [string]$entry.DiscoverySource } else { 'LAN' })
             RequiresValidation = [bool]$entry.RequiresValidation
         })
     }
@@ -930,7 +932,8 @@ function Select-WinRMDiscoveryTarget {
         if (-not $computer.PSObject.Properties['Action']) {
             $computer | Add-Member -NotePropertyName Action -NotePropertyValue 'Target'
         }
-        $label = "$($computer.ComputerName)  $($computer.IPAddress)  [$($computer.Status)]"
+        $sourceTag = if ($computer.PSObject.Properties['DiscoverySource'] -and [string]$computer.DiscoverySource -eq 'Tailscale') { '  (Tailscale)' } else { '' }
+        $label = "$($computer.ComputerName)  $($computer.IPAddress)  [$($computer.Status)]$sourceTag"
         $color = if ($computer.WinRMHttpOpen) { $_C.OK } else { $_C.Warn }
         $computer | Add-Member -NotePropertyName Label -NotePropertyValue $label -Force
         $computer | Add-Member -NotePropertyName Color -NotePropertyValue $color -Force
@@ -947,6 +950,15 @@ function Select-WinRMDiscoveryTarget {
             Color         = $_C.H1
         })
     }
+    $options.Add([PSCustomObject]@{
+        Action        = 'Manual'
+        ComputerName  = 'Enter IP or hostname'
+        IPAddress     = ''
+        WinRMHttpOpen = $false
+        Status        = 'Manual'
+        Label         = '📝 Enter IP or hostname'
+        Color         = $_C.H1
+    })
     Complete-DiskHealthPerformanceStage -Token $buildToken -Status success -ResultCount $options.Count
     return Show-DiskHealthChoiceMenu `
         -Title 'DiskHealth network targets' `
@@ -957,6 +969,70 @@ function Select-WinRMDiscoveryTarget {
         -EscapeMode Back `
         -PerformanceStage 'TargetMenu.FirstFrame' `
         -PerformanceParentStage 'Network.TargetSelection'
+}
+
+function ConvertTo-DiskHealthManualWinRMTarget {
+    # Accepts exactly one IPv4 address or DNS hostname. Anything that could
+    # widen TrustedHosts (lists, wildcards, spaces) is rejected here and again
+    # by the canonical WinRMWorkshop exact-target guard.
+    param([AllowNull()][AllowEmptyString()][string]$InputText)
+
+    $text = ([string]$InputText).Trim().TrimEnd('.')
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+
+    $isIPv4 = $false
+    $parsed = $null
+    if ($text -match '^\d{1,3}(\.\d{1,3}){3}$' -and [System.Net.IPAddress]::TryParse($text, [ref]$parsed)) {
+        $isIPv4 = $parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork
+        if (-not $isIPv4) { return $null }
+        $text = $parsed.IPAddressToString
+    } elseif ($text.Length -gt 253 -or $text -notmatch '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$' -or $text -match '^[\d.]+$') {
+        return $null
+    }
+
+    $isTailscale = $false
+    if ($isIPv4) {
+        $octets = $text.Split('.')
+        $isTailscale = [int]$octets[0] -eq 100 -and [int]$octets[1] -ge 64 -and [int]$octets[1] -le 127
+    } elseif ($text -match '\.ts\.net$') {
+        $isTailscale = $true
+    }
+
+    return [PSCustomObject]@{
+        Action             = 'Target'
+        ComputerName       = $text
+        IPAddress          = $text
+        MACAddress         = 'Unknown'
+        UserName           = 'Unknown'
+        WinRMHttpOpen      = $false
+        Status             = 'Manual'
+        Source             = 'Manual'
+        DiscoverySource    = $(if ($isTailscale) { 'Tailscale' } else { 'Manual' })
+        RequiresValidation = $false
+    }
+}
+
+function Read-DiskHealthManualWinRMTarget {
+    param([Parameter(DontShow)][AllowNull()][scriptblock]$ReadLine)
+
+    $message = ''
+    while ($true) {
+        Clear-Host
+        Write-Host '======================================================================' -ForegroundColor Cyan
+        Write-Host '  📝 MANUAL NETWORK TARGET' -ForegroundColor Cyan
+        Write-Host '======================================================================' -ForegroundColor Cyan
+        Write-Host '  Enter one IPv4 address or hostname, for example a Tailscale' -ForegroundColor White
+        Write-Host '  address (100.x.y.z) or MagicDNS name. ENTER on an empty line = back.' -ForegroundColor White
+        Write-Host '  Only this exact target is added to TrustedHosts.' -ForegroundColor DarkGray
+        if (-not [string]::IsNullOrWhiteSpace($message)) {
+            Write-Host "  $message" -ForegroundColor Yellow
+        }
+        $line = if ($null -ne $ReadLine) { [string](& $ReadLine) } else { Read-Host '  Target' }
+        if ([string]::IsNullOrWhiteSpace($line)) { return $null }
+        $target = ConvertTo-DiskHealthManualWinRMTarget -InputText $line
+        if ($null -ne $target) { return $target }
+        $message = "Not a single IPv4 address or hostname: '$($line.Trim())'. Lists, wildcards and spaces are not allowed."
+    }
 }
 
 function Invoke-DiscoveredWinRMTarget {
@@ -1130,6 +1206,10 @@ if ($script:IsHomeLauncher) {
                         $networkComputers = @($savedState.Targets)
                         continue
                     }
+                    if ($discoveredTarget.Action -eq 'Manual') {
+                        $discoveredTarget = Read-DiskHealthManualWinRMTarget
+                        if ($null -eq $discoveredTarget) { continue }
+                    }
                     Invoke-DiscoveredWinRMTarget -Target $discoveredTarget -DefaultUsername $Username -NetworkInfo $networkInfo
                 }
             } catch {
@@ -1167,6 +1247,10 @@ if ($Discover) {
         if ($discoveredTarget.Action -eq 'Scan') {
             $discoverComputers = @(Get-DiskHealthWinRMComputers -StateRoot $DiscoveryStateRoot -NetworkId $discoverNetworkInfo.NetworkId)
             continue
+        }
+        if ($discoveredTarget.Action -eq 'Manual') {
+            $discoveredTarget = Read-DiskHealthManualWinRMTarget
+            if ($null -eq $discoveredTarget) { continue }
         }
         break
     }

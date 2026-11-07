@@ -119,6 +119,57 @@ if ($selectorFunction.Extent.Text -match 'Get-DiskHealthWinRMComputers' -or $sel
 if ($source -notmatch 'if\s*\(\$Discover\)[\s\S]{0,900}Get-DiskHealthWinRMComputers') {
     throw 'The explicit -Discover automation flag no longer starts full discovery.'
 }
+if ($selectorFunction.Extent.Text -notmatch "Action\s*=\s*'Manual'" -or $selectorFunction.Extent.Text -notmatch 'Enter IP or hostname' -or $selectorFunction.Extent.Text -notmatch "DiscoverySource\s*-eq\s*'Tailscale'") {
+    throw 'The PC selector must offer manual IP/hostname entry and tag Tailscale rows.'
+}
+$manualLoopMatches = [regex]::Matches($source, "Action\s*-eq\s*'Manual'\)\s*\{\s*\`$discoveredTarget\s*=\s*Read-DiskHealthManualWinRMTarget\s*if\s*\(\`$null\s*-eq\s*\`$discoveredTarget\)\s*\{\s*continue\s*\}")
+if ($manualLoopMatches.Count -ne 2) {
+    throw "Both the UI target loop and -Discover must route manual entry back to the selector on cancel; found $($manualLoopMatches.Count)."
+}
+if ($source -notmatch "'Tailscale'\s*=\s*'Discovery\.Tailscale'") {
+    throw 'The Tailscale discovery phase is missing from the structured performance phase map.'
+}
+
+foreach ($manualFunctionName in @('ConvertTo-DiskHealthManualWinRMTarget', 'Read-DiskHealthManualWinRMTarget')) {
+    $manualFunction = $ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $manualFunctionName
+    }, $true) | Select-Object -First 1
+    if (-not $manualFunction) { throw "Missing manual target function: $manualFunctionName" }
+    Invoke-Expression $manualFunction.Extent.Text
+}
+$manualIp = ConvertTo-DiskHealthManualWinRMTarget -InputText ' 100.64.0.20 '
+if ($null -eq $manualIp -or $manualIp.IPAddress -ne '100.64.0.20' -or $manualIp.DiscoverySource -ne 'Tailscale' -or $manualIp.RequiresValidation -or $manualIp.Action -ne 'Target' -or $manualIp.MACAddress -ne 'Unknown') {
+    throw 'Manual Tailscale IPv4 entry did not become a direct, unvalidated exact target.'
+}
+$manualLan = ConvertTo-DiskHealthManualWinRMTarget -InputText '192.168.1.6'
+if ($null -eq $manualLan -or $manualLan.DiscoverySource -ne 'Manual') {
+    throw 'Manual LAN IPv4 entry was misclassified.'
+}
+$manualHost = ConvertTo-DiskHealthManualWinRMTarget -InputText 'ts-win.tailnet.ts.net.'
+if ($null -eq $manualHost -or $manualHost.ComputerName -ne 'ts-win.tailnet.ts.net' -or $manualHost.DiscoverySource -ne 'Tailscale') {
+    throw 'Manual MagicDNS hostname entry was not normalized.'
+}
+if ($null -eq (ConvertTo-DiskHealthManualWinRMTarget -InputText 'WORKSHOP-PC')) {
+    throw 'A single-label hostname must be accepted.'
+}
+foreach ($rejected in @('', '   ', '*', '192.168.1.*', 'pc1,pc2', 'pc one', '999.1.1.1', '1.2.3', 'host?', '-bad', 'bad-.example', 'fd7a::1', ('a' * 64))) {
+    if ($null -ne (ConvertTo-DiskHealthManualWinRMTarget -InputText $rejected)) {
+        throw "Manual entry accepted a value that is not one exact IPv4/hostname: '$rejected'"
+    }
+}
+function Clear-Host {}
+function Write-Host {}
+$script:manualLines = [System.Collections.Generic.Queue[string]]::new()
+foreach ($line in @('pc1,pc2', '100.64.0.21')) { $script:manualLines.Enqueue($line) }
+$manualRead = Read-DiskHealthManualWinRMTarget -ReadLine { $script:manualLines.Dequeue() }
+if ($null -eq $manualRead -or $manualRead.IPAddress -ne '100.64.0.21' -or $script:manualLines.Count -ne 0) {
+    throw 'Manual entry did not re-prompt after an invalid value and accept the next valid target.'
+}
+if ($null -ne (Read-DiskHealthManualWinRMTarget -ReadLine { '' })) {
+    throw 'An empty manual entry must return to the selector.'
+}
+Remove-Item -Path Function:\Clear-Host, Function:\Write-Host
 
 $driveMenuFunction = $ast.FindAll({
     param($node)
@@ -163,8 +214,11 @@ if ($safeMenuText.Length -gt $expectedMaximum -or -not $safeMenuText.EndsWith('.
 Test-ModuleManifest -Path $manifest -ErrorAction Stop | Out-Null
 Import-Module -Name $manifest -Force -ErrorAction Stop
 $module = Test-ModuleManifest -Path $manifest -ErrorAction Stop
-if ($module.Version -lt [version]'1.4.0') {
-    throw "Vendored WinRMDiscovery module must be at least 1.4.0; found $($module.Version)."
+if ($module.Version -lt [version]'1.5.0') {
+    throw "Vendored WinRMDiscovery module must be at least 1.5.0 (Tailscale source); found $($module.Version)."
+}
+if (-not (Get-Command Find-WinRMComputer).Parameters.ContainsKey('SkipTailscale')) {
+    throw 'Vendored Find-WinRMComputer is missing the Tailscale source opt-out.'
 }
 $resolverCommand = Get-Command Resolve-WinRMHistoryTargetAddress -ErrorAction Stop
 if (-not $resolverCommand.Parameters.ContainsKey('IncludeDiagnostics')) {
@@ -186,7 +240,7 @@ foreach ($requiredExport in @(
 
 if ($Live) {
     $rows = @(Find-WinRMComputer)
-    $rows | Sort-Object IPAddress | Format-Table ComputerName, IPAddress, Status -AutoSize
+    $rows | Sort-Object IPAddress | Format-Table ComputerName, IPAddress, Status, DiscoverySource -AutoSize
 }
 
 Write-Host 'DiskHealth WinRMDiscovery integration tests passed.' -ForegroundColor Green
