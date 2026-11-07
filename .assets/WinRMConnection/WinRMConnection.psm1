@@ -609,6 +609,48 @@ function Test-WinRMConnection {
     }
 }
 
+function Get-WinRMRemoteCapability {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Management.Automation.Runspaces.PSSession]$Session
+    )
+
+    # Probe in the existing session; never reopen it or retry the command.
+    # The remote block must also run in Windows PowerShell 2.0 / .NET 2.0.
+    Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
+        $hasCim = $null -ne (Get-Command Get-CimInstance -ErrorAction SilentlyContinue)
+        $hasWmi = $null -ne (Get-Command Get-WmiObject -ErrorAction SilentlyContinue)
+        if ($hasCim) {
+            $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        } elseif ($hasWmi) {
+            $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction Stop
+        } else {
+            throw 'Neither CIM nor WMI is available to identify the remote operating system.'
+        }
+        $hasWinEvent = $null -ne (Get-Command Get-WinEvent -ErrorAction SilentlyContinue)
+        $hasEventLog = $null -ne (Get-Command Get-EventLog -ErrorAction SilentlyContinue)
+        $capabilities = @{
+            ComputerName = $env:COMPUTERNAME
+            OperatingSystem = [string]$os.Caption
+            OperatingSystemVersion = [string]$os.Version
+            PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+            HasCim = $hasCim
+            HasWmi = $hasWmi
+            HasGetWinEvent = $hasWinEvent
+            HasGetEventLog = $hasEventLog
+            HasNetTCPIP = $null -ne (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)
+            HasNetSecurity = $null -ne (Get-Command Get-NetFirewallRule -ErrorAction SilentlyContinue)
+            HasLocalAccounts = $null -ne (Get-Command Get-LocalUser -ErrorAction SilentlyContinue)
+            HasScheduledTasks = $null -ne (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)
+            IsLegacyPowerShell = $PSVersionTable.PSVersion -lt [version]'5.1'
+            ManagementCommand = $(if ($hasCim) { 'Get-CimInstance' } else { 'Get-WmiObject' })
+            EventLogCommand = $(if ($hasWinEvent) { 'Get-WinEvent' } elseif ($hasEventLog) { 'Get-EventLog' } else { '' })
+        }
+        New-Object PSObject -Property $capabilities
+    }
+}
+
 function Invoke-WinRMCommand {
     [CmdletBinding()]
     param(
@@ -658,6 +700,7 @@ Export-ModuleMember -Function @(
     'Connect-WinRMSession'
     'Get-WinRMCredentialProfile'
     'Get-WinRMConnectionErrorCategory'
+    'Get-WinRMRemoteCapability'
     'Invoke-WinRMCommand'
     'New-WinRMBlankPasswordCredential'
     'Remove-WinRMCredentialProfile'
